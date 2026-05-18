@@ -1,47 +1,61 @@
 # Local Resource Manager
 
-桌面端文件资源浏览器：选一个根文件夹后建立内存索引，用多列视图浏览目录结构，并按名称扩展名搜索；附带文件表格、主题切换与可配置的键盘快捷键。
+A desktop **file explorer and lightweight indexer**: pick a root folder, scan it into an in-memory index, browse with a multi-column outline, filter by folder tree, search by filename or extension, and inspect files in a table with themes and configurable shortcuts.
 
-**仓库：** [github.com/xintian-lab/local-resource-manager](https://github.com/xintian-lab/local-resource-manager)
+**Repository:** [github.com/xintian-lab/local-resource-manager](https://github.com/xintian-lab/local-resource-manager)
 
-## 运行环境
+## Requirements
 
-- Python 3.10+（建议与当前使用的版本一致）
-- Windows（当前开发与测试平台）
+- **Python** 3.10+ recommended
+- **Windows** — current primary dev and test target (macOS support is planned for packaged builds).
 
-## 本地运行
+## Quick start
 
 ```bash
 cd local-resource-manager
 python -m venv .venv
-.venv\Scripts\activate          # Linux / macOS: source .venv/bin/activate
+# Windows:
+.venv\Scripts\activate
+# Linux / macOS:
+# source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
 ```
 
-## 依赖
+## Dependencies
 
-参见 `requirements.txt`（核心是 **PySide6**）。
+See [`requirements.txt`](requirements.txt): **PySide6** drives the GUI; **PyInstaller** is included for future packaging workflows.
 
-打包发布可使用 **PyInstaller**（可选安装项已写在 `requirements.txt` 中）。
+## Data and configuration (local paths)
 
-## 数据与配置
+Running from source uses paths under your project/checkout:
 
-| 用途 | 位置（源码运行） |
-|------|------------------|
-| SQLite 索引 | `app/data/file_index.db`（由 `.gitignore` 排除） |
-| 用户设置（主题、快捷键等） | `app/config/settings.json`（默认不纳入版本库） |
+| Purpose | Location |
+| -------- | --------- |
+| SQLite index | `app/data/file_index.db` (ignored by Git) |
+| User settings (theme, shortcuts, etc.) | `app/config/settings.json` (ignored by Git) |
 
-克隆后首次启动会在本地生成上述文件；不要将含个人路径的 `settings.json` 提交进仓库。
+After cloning, files are created on first run. **Do not commit** a `settings.json` that contains private paths.
 
-## 项目布局（简要）
+## Repository layout
 
 ```
-main.py           # 入口
-app/ui/           # PySide 界面（主窗口、列视图、文件表）
-app/core/         # 扫描、索引、搜索、路径与文件操作
+main.py           # Entry point
+app/ui/           # PySide widgets (main window, column browser, file table)
+app/core/         # Scanner, indexer, search, paths, file operations
+build_exe.ps1     # Windows-oriented build helper (evolving)
 ```
+
+## Roadmap
+
+Planned additions (will land in-repo and ship via **`git push` / Releases**):
+
+- **Windows** — downloadable **`.exe`** (or installer) built with PyInstaller (or similar), with sensible signing and versioning TBD.
+- **macOS** — **`.app`** bundle distribution (same Qt stack via PyInstaller or platform-specific tooling), notarized/signing workflow TBD.
+- Smaller fixes: portability checks on macOS, CI to build binaries in a repeatable way once the pipelines are settled.
+
+Contribution and issue tracking welcome as the packaged releases stabilize.
 
 ## License
 
-未定；后续可在仓库中添加 `LICENSE`。
+Not stated yet — a `LICENSE` file will be added when the redistribution terms are finalized.
