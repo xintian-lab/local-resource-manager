@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 from PySide6.QtCore import (
@@ -60,10 +61,10 @@ DEFAULT_THEME = "classic_dark"
 THEMES = {
     "classic_dark": {
         "label": "Classic Dark (Default)",
-        "background": "#2b2b2b",
-        "surface": "#333333",
-        "text": "#f2f2f2",
-        "border": "#555555",
+        "background": "#1e1e1e",
+        "surface": "#252526",
+        "text": "#cccccc",
+        "border": "#3c3c3c",
     },
     "light": {
         "label": "Light White",
@@ -120,7 +121,6 @@ DEFAULT_KEY_BINDINGS = {
     "clear_search": "Esc",
     "select_root": "Ctrl+O",
     "pin_folder": "Ctrl+P",
-    "unpin_folder": "Ctrl+Shift+P",
     "copy_file": "Ctrl+C",
     "cut_file": "Ctrl+X",
     "paste_file": "Ctrl+V",
@@ -134,8 +134,7 @@ KEY_BINDING_LABELS = {
     "focus_search": "Focus search box",
     "clear_search": "Clear search",
     "select_root": "Select root folder",
-    "pin_folder": "Pin current folder",
-    "unpin_folder": "Unpin folder",
+    "pin_folder": "Pin/unpin folder",
     "copy_file": "Copy selected file",
     "cut_file": "Cut selected file",
     "paste_file": "Paste into current folder",
@@ -389,10 +388,11 @@ class MainWindow(QMainWindow):
         self.scan_worker: ScanWorker | None = None
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
+        self.last_search_elapsed_ms: float | None = None
 
         self.select_root_button = QPushButton("Select Root Folder")
-        self.pin_folder_button = QPushButton("Pin Folder")
-        self.unpin_folder_button = QPushButton("Unpin")
+        self.pin_folder_button = QPushButton("Pin/Unpin Folder")
+        self.pin_folder_button.setCheckable(True)
         self.keyboard_mode_button = QPushButton()
         self.keyboard_mode_button.setCheckable(True)
         self.keyboard_mode_button.setChecked(self.keyboard_mode_enabled)
@@ -400,6 +400,7 @@ class MainWindow(QMainWindow):
         self.next_results_button = QPushButton("Next")
         self.results_page_label = QLabel("")
         self.scope_label = QLabel("Scope: Root")
+        self.search_status_label = QLabel("")
         self.root_label = QLabel("No root selected")
         self.search_input = QLineEdit()
         self._update_search_placeholder()
@@ -418,7 +419,6 @@ class MainWindow(QMainWindow):
         for button in (
             self.select_root_button,
             self.pin_folder_button,
-            self.unpin_folder_button,
             self.keyboard_mode_button,
             self.previous_results_button,
             self.next_results_button,
@@ -428,11 +428,9 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout()
         toolbar.addWidget(self.select_root_button)
         toolbar.addWidget(self.pin_folder_button)
-        toolbar.addWidget(self.unpin_folder_button)
         toolbar.addWidget(self.keyboard_mode_button)
         toolbar.addWidget(self.scope_label)
-        toolbar.addWidget(self.root_label, stretch=1)
-        toolbar.addWidget(self.search_input, stretch=2)
+        toolbar.addWidget(self.search_input, stretch=1)
         toolbar.addWidget(self.previous_results_button)
         toolbar.addWidget(self.next_results_button)
         toolbar.addWidget(self.results_page_label)
@@ -450,6 +448,9 @@ class MainWindow(QMainWindow):
         central.setLayout(layout)
         self.setCentralWidget(central)
         self.setStatusBar(self.status)
+        self.status.addWidget(self.root_label, stretch=1)
+        self.status.addPermanentWidget(self.search_status_label)
+        self._apply_tooltip_show_delay()
         self.status.showMessage("Choose a root folder to scan.")
 
     def _build_menu(self) -> None:
@@ -463,8 +464,7 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.select_root_button.clicked.connect(self.select_root_folder)
-        self.pin_folder_button.clicked.connect(self._pin_selected_folder)
-        self.unpin_folder_button.clicked.connect(self._unpin_folder)
+        self.pin_folder_button.clicked.connect(self._on_pin_folder_button_clicked)
         self.keyboard_mode_button.toggled.connect(self._set_keyboard_mode_enabled)
         self.previous_results_button.clicked.connect(self._show_previous_results_page)
         self.next_results_button.clicked.connect(self._show_next_results_page)
@@ -567,8 +567,7 @@ class MainWindow(QMainWindow):
             "focus_search": self._focus_search_box,
             "clear_search": self._clear_search,
             "select_root": self.select_root_folder,
-            "pin_folder": self._pin_selected_folder,
-            "unpin_folder": self._unpin_folder,
+            "pin_folder": self._toggle_pin_folder,
             "copy_file": self._copy_selected_file,
             "cut_file": self._cut_selected_file,
             "paste_file": self._paste_into_selected_folder,
@@ -754,8 +753,6 @@ class MainWindow(QMainWindow):
 
         if self.search_mode == SEARCH_MODE_DEBOUNCED:
             self.search_timer.start(self.debounce_ms)
-        else:
-            self.status.showMessage("Press Enter to search.")
 
     @Slot()
     def _apply_search_from_input(self) -> None:
@@ -775,13 +772,13 @@ class MainWindow(QMainWindow):
         self.active_search_query = query
         self.search_result_offset = 0
         self.column_view.set_search_query(self.active_search_query)
+        started = time.perf_counter()
         self._refresh_files()
-
-        if show_status:
-            if self.active_search_query.strip():
-                self.status.showMessage(f"Search applied: {self.active_search_query}")
-            else:
-                self.status.showMessage("Search cleared.")
+        if self.active_search_query.strip():
+            self.last_search_elapsed_ms = (time.perf_counter() - started) * 1000
+        else:
+            self.last_search_elapsed_ms = None
+        self._update_search_status_label()
 
     @Slot(str)
     def _handle_folder_selected(self, folder_path: str) -> None:
@@ -854,6 +851,24 @@ class MainWindow(QMainWindow):
             )
 
         return []
+
+    def _toggle_pin_folder(self) -> None:
+        if self.pinned_folder_path:
+            self._unpin_folder()
+        else:
+            self._pin_selected_folder()
+
+    @Slot(bool)
+    def _on_pin_folder_button_clicked(self, checked: bool) -> None:
+        if checked:
+            before = self.pinned_folder_path
+            self._pin_selected_folder()
+            if self.pinned_folder_path == before:
+                self.pin_folder_button.blockSignals(True)
+                self.pin_folder_button.setChecked(False)
+                self.pin_folder_button.blockSignals(False)
+        else:
+            self._unpin_folder()
 
     @Slot()
     def _pin_selected_folder(self) -> None:
@@ -1168,22 +1183,48 @@ class MainWindow(QMainWindow):
         return self.key_bindings.get(action_id, "")
 
     def _apply_shortcut_labels(self) -> None:
-        self.select_root_button.setText(
-            self._label_with_shortcut("Select Root Folder", "select_root")
-        )
-        self.pin_folder_button.setText(self._label_with_shortcut("Pin Folder", "pin_folder"))
-        self.unpin_folder_button.setText(self._label_with_shortcut("Unpin", "unpin_folder"))
+        self.select_root_button.setText("Select Root Folder")
+        self._set_button_shortcut_tooltip(self.select_root_button, "select_root")
+        self.pin_folder_button.setText("Pin/Unpin Folder")
+        self._set_button_shortcut_tooltip(self.pin_folder_button, "pin_folder")
         self._update_keyboard_mode_button()
         self.file_table.set_shortcut_labels(self.key_bindings)
         self._update_search_placeholder()
 
+    def _set_button_shortcut_tooltip(self, button: QPushButton, action_id: str) -> None:
+        description = KEY_BINDING_LABELS.get(action_id, "")
+        shortcut = self._shortcut_label(action_id)
+        if description and shortcut:
+            button.setToolTip(f"{description} ({shortcut})")
+        elif shortcut:
+            button.setToolTip(shortcut)
+        elif description:
+            button.setToolTip(description)
+        else:
+            button.setToolTip("")
+
+    def _apply_tooltip_show_delay(self) -> None:
+        app = QApplication.instance()
+        if app is None:
+            return
+        hints = app.styleHints()
+        setter = getattr(hints, "setToolTipShowDelay", None)
+        if callable(setter):
+            setter(800)
+
+    def _update_search_status_label(self) -> None:
+        if self.active_search_query.strip():
+            text = f"Search applied: {self.active_search_query}"
+            if self.last_search_elapsed_ms is not None:
+                text += f" · {self.last_search_elapsed_ms:.1f} ms"
+            self.search_status_label.setText(text)
+            return
+
+        self.search_status_label.setText("")
+
     def _update_keyboard_mode_button(self) -> None:
         state = "On" if self.keyboard_mode_enabled else "Off"
         self.keyboard_mode_button.setText(f"Keyboard Mode: {state}")
-
-    def _label_with_shortcut(self, label: str, action_id: str) -> str:
-        shortcut = self._shortcut_label(action_id)
-        return f"{label} ({shortcut})" if shortcut else label
 
     def _normalize_theme_name(self, value: object) -> str:
         theme_name = str(value or "")
@@ -1208,6 +1249,23 @@ class MainWindow(QMainWindow):
             QDialog {{
                 background: {theme["background"]};
                 color: {theme["text"]};
+            }}
+
+            QMenu::item {{
+                padding: 6px 28px 6px 12px;
+                background: transparent;
+            }}
+
+            QMenu::item:selected,
+            QMenu::item:hover {{
+                background: #cfe8ff;
+                color: #111111;
+            }}
+
+            QMenu::separator {{
+                height: 1px;
+                background: {theme["border"]};
+                margin: 4px 8px;
             }}
 
             QPushButton,
@@ -1346,15 +1404,7 @@ class MainWindow(QMainWindow):
         return min(max(results_page_size, 50), 5000)
 
     def _update_search_placeholder(self) -> None:
-        focus_hint = self._shortcut_label("focus_search")
-        clear_hint = self._shortcut_label("clear_search")
-        shortcut_hints = []
-        if focus_hint:
-            shortcut_hints.append(f"{focus_hint} focus")
-        if clear_hint:
-            shortcut_hints.append(f"{clear_hint} clear")
-        shortcut_hint = f" ({', '.join(shortcut_hints)})" if shortcut_hints else ""
-        hint = f"Search name or extension, e.g. report, .csv, png{shortcut_hint}"
+        hint = "Search name or extension, e.g. report, .csv, png"
         if self.search_mode == SEARCH_MODE_DEBOUNCED:
             self.search_input.setPlaceholderText(f"{hint} ({self.debounce_ms} ms debounce)")
         else:
@@ -1364,14 +1414,20 @@ class MainWindow(QMainWindow):
         has_root = bool(self.root_path)
         has_selection = bool(self.selected_folder)
         is_pinned = bool(self.pinned_folder_path)
-
-        self.pin_folder_button.setEnabled(
+        can_pin = (
             has_root
             and has_selection
             and self.selected_folder != self.root_path
-            and self.selected_folder != self.pinned_folder_path
         )
-        self.unpin_folder_button.setEnabled(is_pinned)
+
+        if is_pinned:
+            self.pin_folder_button.setEnabled(has_root)
+        else:
+            self.pin_folder_button.setEnabled(can_pin)
+
+        self.pin_folder_button.blockSignals(True)
+        self.pin_folder_button.setChecked(is_pinned)
+        self.pin_folder_button.blockSignals(False)
 
         if is_pinned:
             self.scope_label.setText(f"Scope: {Path(self.pinned_folder_path).name}")

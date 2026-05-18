@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import platform
 from datetime import datetime
 from pathlib import Path
 from typing import Sequence
@@ -7,13 +8,15 @@ from typing import Sequence
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFileDialog,
     QHeaderView,
     QMenu,
+    QMessageBox,
     QTableWidget,
     QTableWidgetItem,
 )
 
-from app.core.file_ops import open_containing_folder, open_file
+from app.core.file_ops import open_containing_folder, open_file, open_file_with
 
 
 class FileTable(QTableWidget):
@@ -118,7 +121,9 @@ class FileTable(QTableWidget):
         )
 
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         open_action = None
+        open_with_action = None
         open_folder_action = None
         copy_action = None
         cut_action = None
@@ -126,6 +131,7 @@ class FileTable(QTableWidget):
 
         if action_file_paths:
             open_action = menu.addAction("Open File")
+            open_with_action = menu.addAction("Open With...")
             open_folder_action = menu.addAction("Open Containing Folder")
             menu.addSeparator()
             copy_action = menu.addAction(self._action_label("Copy", "copy_file"))
@@ -148,6 +154,8 @@ class FileTable(QTableWidget):
                 self.folder_open_requested.emit(file_path)
             else:
                 open_file(action_file_paths[0])
+        elif selected_action == open_with_action:
+            self._open_file_with(action_file_paths[0])
         elif selected_action == open_folder_action:
             target_path = action_file_paths[0] if action_file_paths else file_path
             open_containing_folder(target_path)
@@ -161,6 +169,41 @@ class FileTable(QTableWidget):
             self.add_file_requested.emit()
         elif selected_action == paste_action:
             self.paste_requested.emit()
+
+    def _open_file_with(self, file_path: str) -> None:
+        try:
+            if platform.system() == "Windows":
+                open_file_with(file_path)
+                return
+        except OSError as exc:
+            if platform.system() != "Windows":
+                raise
+            reply = QMessageBox.question(
+                self,
+                "Open With",
+                (
+                    "Could not open the system 'Open with' dialog.\n\n"
+                    f"{exc}\n\n"
+                    "Choose an application manually?"
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        application, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Open With",
+            "",
+            "Applications (*.exe);;All Files (*)",
+        )
+        if not application:
+            return
+        try:
+            open_file_with(file_path, application)
+        except OSError as exc:
+            QMessageBox.warning(self, "Open With", str(exc))
 
     def _open_selected_file(self, *_args: object) -> None:
         file_path = self._selected_path()

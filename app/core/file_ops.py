@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import platform
 import shutil
@@ -19,6 +20,53 @@ def open_file(path: str | Path) -> None:
         subprocess.Popen(["open", str(target)])
     else:
         subprocess.Popen(["xdg-open", str(target)])
+
+
+def _windows_open_with_dialog(target: Path) -> None:
+    """Show the system 'Open with' dialog (same mechanism as Explorer)."""
+    resolved = str(target.resolve())
+    rundll32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "rundll32.exe"
+    subprocess.Popen(
+        [str(rundll32), "shell32.dll,OpenAs_RunDLL", resolved],
+        close_fds=True,
+    )
+
+
+def _windows_open_with_app(target: Path, application: Path) -> None:
+    result = ctypes.windll.shell32.ShellExecuteW(  # type: ignore[attr-defined]
+        None,
+        "open",
+        str(application.resolve()),
+        str(target.resolve()),
+        str(target.parent),
+        1,
+    )
+    if result <= 32:
+        raise OSError(f"ShellExecute failed with code {result}")
+
+
+def open_file_with(path: str | Path, application: str | Path | None = None) -> None:
+    target = Path(path)
+    system = platform.system()
+
+    if system == "Windows":
+        if application is None:
+            _windows_open_with_dialog(target)
+        else:
+            _windows_open_with_app(target, Path(application))
+        return
+
+    if system == "Darwin":
+        if application is None:
+            subprocess.Popen(["open", str(target)])
+        else:
+            subprocess.Popen(["open", "-a", str(application), str(target)])
+        return
+
+    if application is None:
+        subprocess.Popen(["xdg-open", str(target)])
+    else:
+        subprocess.Popen([str(application), str(target)])
 
 
 def open_containing_folder(path: str | Path) -> None:
