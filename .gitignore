@@ -1,0 +1,11 @@
+.venv/
+.venv-lrm/
+build/
+dist/
+*.spec
+__pycache__/
+*.py[cod]
+app/data/*.db
+app/data/*.db-shm
+app/data/*.db-wal
+app/config/settings.json
