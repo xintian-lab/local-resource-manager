@@ -1,0 +1,3 @@
+# Local venvs — huge and machine-specific; no need to index in Cursor.
+.venv/
+venv/

@@ -1,5 +1,10 @@
+# Local virtual environments — always machine-specific; never commit or cloud-sync.
 .venv/
+venv/
 .venv-lrm/
+.venv-win/
+.venv-mac/
+.venv-darwin/
 build/
 dist/
 *.spec
@@ -9,3 +14,4 @@ app/data/*.db
 app/data/*.db-shm
 app/data/*.db-wal
 app/config/settings.json
+app/config/bookmarks.json

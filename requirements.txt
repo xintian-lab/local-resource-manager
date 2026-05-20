@@ -1,2 +1,3 @@
+# Application dependencies. Install only inside a local .venv on this machine (see README).
 PySide6
 pyinstaller

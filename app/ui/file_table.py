@@ -8,6 +8,7 @@ from typing import Sequence
 from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QFileDialog,
     QHeaderView,
     QMenu,
@@ -15,6 +16,9 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
 )
+
+from app.ui.layout_constants import CONTENT_PANEL_ID, PANEL_HEADER_HEIGHT
+from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
 
 from app.core.file_ops import open_containing_folder, open_file, open_file_with
 
@@ -26,6 +30,7 @@ class FileTable(QTableWidget):
     delete_requested = Signal(list)
     folder_open_requested = Signal(str)
     paste_requested = Signal()
+    copy_path_requested = Signal(str)
 
     headers = ["Name", "Extension", "Size", "Modified", "Folder"]
 
@@ -33,6 +38,9 @@ class FileTable(QTableWidget):
         super().__init__(parent)
         self.scroll_animation: QPropertyAnimation | None = None
         self.shortcut_labels: dict[str, str] = {}
+        self.setObjectName(CONTENT_PANEL_ID)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setCornerButtonEnabled(False)
         self.setColumnCount(len(self.headers))
         self.setHorizontalHeaderLabels(self.headers)
         self.setAlternatingRowColors(True)
@@ -41,8 +49,14 @@ class FileTable(QTableWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSortingEnabled(True)
         self.verticalHeader().setVisible(False)
-        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header = self.horizontalHeader()
+        header.setFixedHeight(PANEL_HEADER_HEIGHT)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.resizeSection(0, 240)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
         self.itemDoubleClicked.connect(self._open_selected_file)
@@ -128,6 +142,7 @@ class FileTable(QTableWidget):
         copy_action = None
         cut_action = None
         delete_action = None
+        copy_path_action = None
 
         if action_file_paths:
             open_action = menu.addAction("Open File")
@@ -138,9 +153,13 @@ class FileTable(QTableWidget):
             cut_action = menu.addAction(self._action_label("Cut", "cut_file"))
             delete_action = menu.addAction(self._action_label("Delete", "delete_file"))
             menu.addSeparator()
+            copy_path_action = menu.addAction(COPY_FULL_PATH_LABEL)
+            menu.addSeparator()
         elif file_path and result_type == "Folder":
             open_action = menu.addAction("Open Folder")
             open_folder_action = menu.addAction("Open Containing Folder")
+            menu.addSeparator()
+            copy_path_action = menu.addAction(COPY_FULL_PATH_LABEL)
             menu.addSeparator()
 
         add_file_action = menu.addAction("Add File...")
@@ -165,6 +184,8 @@ class FileTable(QTableWidget):
             self.cut_requested.emit(action_file_paths)
         elif selected_action == delete_action:
             self.delete_requested.emit(action_file_paths)
+        elif selected_action == copy_path_action and file_path:
+            self.copy_path_requested.emit(file_path)
         elif selected_action == add_file_action:
             self.add_file_requested.emit()
         elif selected_action == paste_action:

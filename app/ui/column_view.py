@@ -7,18 +7,31 @@ from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
+    QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QScrollArea,
     QSizePolicy,
+    QVBoxLayout,
     QWidget,
 )
+
+from app.ui.layout_constants import (
+    CONTENT_PANEL_ID,
+    FOLDER_COLUMN_ID,
+    PANEL_HEADER_HEIGHT,
+    PANEL_HEADER_ID,
+)
+from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
 
 FolderLoader = Callable[[str, str], Sequence[object]]
 
 
 class ColumnView(QWidget):
     folder_selected = Signal(str)
+    bookmark_requested = Signal(str)
+    copy_path_requested = Signal(str)
 
     def __init__(self, folder_loader: FolderLoader, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -31,30 +44,41 @@ class ColumnView(QWidget):
         self.active_column_index = 0
         self.scroll_animation: QPropertyAnimation | None = None
 
+        self.setObjectName(CONTENT_PANEL_ID)
+
+        self.header_label = QLabel("Folders")
+        self.header_label.setObjectName(PANEL_HEADER_ID)
+        self.header_label.setFixedHeight(PANEL_HEADER_HEIGHT)
+
         self.scroll_area = QScrollArea()
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.container = QWidget()
+        self.container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.column_layout = QHBoxLayout(self.container)
         self.column_layout.setContentsMargins(0, 0, 0, 0)
-        self.column_layout.setSpacing(8)
+        self.column_layout.setSpacing(0)
         self.column_layout.addStretch(1)
         self.scroll_area.setWidget(self.container)
 
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.scroll_area)
+        layout.setSpacing(0)
+        layout.addWidget(self.header_label)
+        layout.addWidget(self.scroll_area, stretch=1)
 
-    def set_root(self, root_path: str) -> None:
+    def set_root(self, root_path: str, *, emit_selection: bool = True) -> None:
         self.root_path = root_path
         self.current_path = root_path
         self.active_column_index = 0
         self._clear_columns()
         self._add_column(root_path, force=True)
         self._scroll_to_start()
-        self.folder_selected.emit(root_path)
+        if emit_selection:
+            self.folder_selected.emit(root_path)
 
     def set_search_query(self, query: str) -> None:
         self.search_query = query
@@ -93,10 +117,13 @@ class ColumnView(QWidget):
             return False
 
         column = QListWidget()
+        column.setObjectName(FOLDER_COLUMN_ID)
         column.setMinimumWidth(220)
         column.setMaximumWidth(320)
         column.setFrameShape(QFrame.Shape.NoFrame)
         column.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        column.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        column.customContextMenuRequested.connect(self._show_folder_context_menu)
         column.itemClicked.connect(self._handle_item_clicked)
         column.setProperty("parent_path", parent_path)
 
@@ -117,6 +144,7 @@ class ColumnView(QWidget):
 
     def _add_empty_column(self, parent_path: str = "") -> None:
         column = QListWidget()
+        column.setObjectName(FOLDER_COLUMN_ID)
         column.setMinimumWidth(220)
         column.setMaximumWidth(320)
         column.setFrameShape(QFrame.Shape.NoFrame)
@@ -134,6 +162,25 @@ class ColumnView(QWidget):
         selected_path = str(item.data(Qt.ItemDataRole.UserRole))
         self.active_column_index = column_index
         self._select_item_in_column(column_index, item)
+
+    def _show_folder_context_menu(self, position) -> None:
+        column = self.sender()
+        if not isinstance(column, QListWidget):
+            return
+
+        item = column.itemAt(position)
+        if item is None:
+            return
+
+        folder_path = str(item.data(Qt.ItemDataRole.UserRole))
+        menu = QMenu(self)
+        save_action = menu.addAction("Save to Tabs")
+        copy_path_action = menu.addAction(COPY_FULL_PATH_LABEL)
+        chosen = menu.exec(column.mapToGlobal(position))
+        if chosen is save_action:
+            self.bookmark_requested.emit(folder_path)
+        elif chosen is copy_path_action:
+            self.copy_path_requested.emit(folder_path)
 
     def _remove_columns_after(self, column_index: int) -> None:
         while len(self.columns) > column_index + 1:
@@ -164,11 +211,41 @@ class ColumnView(QWidget):
         if candidates:
             self._animate_to_scroll_value(candidates[0].x())
 
-    def select_previous_folder(self, animate_child_preview: bool = True) -> bool:
-        return self._move_selection(-1, animate_child_preview)
+    def select_previous_folder(
+        self,
+        animate_child_preview: bool = True,
+        commit: bool = True,
+    ) -> bool:
+        return self._move_selection(-1, animate_child_preview, commit=commit)
 
-    def select_next_folder(self, animate_child_preview: bool = True) -> bool:
-        return self._move_selection(1, animate_child_preview)
+    def select_next_folder(
+        self,
+        animate_child_preview: bool = True,
+        commit: bool = True,
+    ) -> bool:
+        return self._move_selection(1, animate_child_preview, commit=commit)
+
+    def commit_active_column_selection(self) -> bool:
+        column = self._active_column()
+        if column is None:
+            return False
+
+        item = column.currentItem()
+        if item is None or not item.flags() & Qt.ItemFlag.ItemIsEnabled:
+            item = self._ensure_current_item(column)
+        if item is None:
+            return False
+
+        selected_path = str(item.data(Qt.ItemDataRole.UserRole))
+        if selected_path == self.current_path:
+            return False
+
+        self._select_item_in_column(
+            self.columns.index(column),
+            item,
+            force_scroll_to_selected=True,
+        )
+        return True
 
     def ensure_keyboard_selection(self) -> bool:
         column = self._active_column()
@@ -220,21 +297,34 @@ class ColumnView(QWidget):
         self._select_item_in_column(parent_column_index, item, force_scroll_to_selected=True)
         return True
 
-    def _move_selection(self, direction: int, animate_child_preview: bool) -> bool:
+    def _move_selection(
+        self,
+        direction: int,
+        animate_child_preview: bool,
+        commit: bool = True,
+    ) -> bool:
         column = self._active_column()
         if column is None:
             return False
+
+        column_index = self.columns.index(column)
+
+        def apply_item(item: QListWidgetItem) -> None:
+            if commit:
+                self._select_item_in_column(
+                    column_index,
+                    item,
+                    animate_child_preview=animate_child_preview,
+                )
+            else:
+                self._highlight_item_in_column(column_index, item)
 
         current_item = column.currentItem()
         if current_item is None or not current_item.flags() & Qt.ItemFlag.ItemIsEnabled:
             first_item = self._first_enabled_item(column)
             if first_item is None:
                 return False
-            self._select_item_in_column(
-                self.columns.index(column),
-                first_item,
-                animate_child_preview=animate_child_preview,
-            )
+            apply_item(first_item)
             return True
 
         current_item = self._ensure_current_item(column)
@@ -247,13 +337,23 @@ class ColumnView(QWidget):
         for row_index in row_range:
             item = column.item(row_index)
             if item and item.flags() & Qt.ItemFlag.ItemIsEnabled:
-                self._select_item_in_column(
-                    self.columns.index(column),
-                    item,
-                    animate_child_preview=animate_child_preview,
-                )
+                apply_item(item)
                 return True
+
+        wrap_target = (
+            self._first_enabled_item(column)
+            if direction > 0
+            else self._last_enabled_item(column)
+        )
+        if wrap_target is not None and wrap_target is not current_item:
+            apply_item(wrap_target)
+            return True
         return False
+
+    def _highlight_item_in_column(self, column_index: int, item: QListWidgetItem) -> None:
+        column = self.columns[column_index]
+        column.setCurrentItem(item)
+        column.scrollToItem(item)
 
     def _select_item_in_column(
         self,
@@ -337,6 +437,13 @@ class ColumnView(QWidget):
 
     def _first_enabled_item(self, column: QListWidget) -> QListWidgetItem | None:
         for row_index in range(column.count()):
+            item = column.item(row_index)
+            if item and item.flags() & Qt.ItemFlag.ItemIsEnabled:
+                return item
+        return None
+
+    def _last_enabled_item(self, column: QListWidget) -> QListWidgetItem | None:
+        for row_index in range(column.count() - 1, -1, -1):
             item = column.item(row_index)
             if item and item.flags() & Qt.ItemFlag.ItemIsEnabled:
                 return item

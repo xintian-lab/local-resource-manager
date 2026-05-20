@@ -9,18 +9,44 @@ A desktop **file explorer and lightweight indexer**: pick a root folder, scan it
 - **Python** 3.10+ recommended
 - **Windows** — current primary dev and test target (macOS support is planned for packaged builds).
 
+## Virtual environment (local only)
+
+The `.venv` folder is **only for the computer where you create it**. It contains OS-specific binaries and must **not** be shared between machines via Git, Dropbox, OneDrive, iCloud Drive, or similar sync tools. Sharing it causes broken installs, huge uploads, and overwritten environments.
+
+**Do this on each machine:**
+
+1. Open your cloud sync settings for this project folder and **exclude** `.venv` from sync (and optionally any alternate names like `venv/` if you use them).
+2. Create the environment locally (commands below), then run `pip install -r requirements.txt`.
+
+The repo already lists `.venv/` in `.gitignore` so it never gets committed.
+
 ## Quick start
 
 ```bash
 cd local-resource-manager
+```
+
+**Windows (PowerShell or Command Prompt):**
+
+```bash
 python -m venv .venv
-# Windows:
 .venv\Scripts\activate
-# Linux / macOS:
-# source .venv/bin/activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 python main.py
 ```
+
+**macOS / Linux:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py
+```
+
+**Cursor / VS Code:** open the project folder; the Python extension should detect `.venv` automatically. Use **Python: Select Interpreter** if needed and pick `.venv` → `python`. Integrated terminals can auto-activate the venv when `python.terminal.activateEnvironment` is enabled (set in `.vscode/settings.json`).
 
 ## Dependencies
 

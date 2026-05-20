@@ -16,7 +16,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QCursor, QKeySequence
+from PySide6.QtGui import QCursor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -42,293 +42,35 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.core.bookmarks import BookmarkTab, load_bookmarks, save_bookmarks
 from app.core.file_ops import copy_file_to_folder, delete_file, move_file_to_folder
 from app.core.indexer import FileIndexer
-from app.core.paths import settings_path
+from app.core.paths import database_path_for_root, database_path, settings_path
 from app.core.scanner import FileScanner, ScanResult, normalize_path
 from app.core.search import SearchService
+from app.ui.bookmark_tab_bar import BookmarkTabBar
+from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
 from app.ui.column_view import ColumnView
 from app.ui.file_table import FileTable
+from app.ui.settings_constants import (
+    DEFAULT_DEBOUNCE_MS,
+    DEFAULT_KEY_BINDINGS,
+    DEFAULT_KEYBOARD_FOLDER_REFRESH,
+    DEFAULT_RESULTS_PAGE_SIZE,
+    DEFAULT_SEARCH_MODE,
+    DEFAULT_THEME,
+    KEY_BINDING_LABELS,
+    KEYBOARD_FOLDER_REFRESH_IMMEDIATE,
+    KEYBOARD_FOLDER_REFRESH_ON_ENTER,
+    SEARCH_MODE_DEBOUNCED,
+    SEARCH_MODE_ENTER,
+    THEMES,
+    normalize_key_sequence,
+)
+from app.ui.settings_dialog import SettingsDialog
 
 
 SETTINGS_PATH = settings_path()
-SEARCH_MODE_DEBOUNCED = "debounced"
-SEARCH_MODE_ENTER = "enter"
-DEFAULT_SEARCH_MODE = SEARCH_MODE_ENTER
-DEFAULT_DEBOUNCE_MS = 300
-DEFAULT_RESULTS_PAGE_SIZE = 300
-DEFAULT_THEME = "classic_dark"
-THEMES = {
-    "classic_dark": {
-        "label": "Classic Dark (Default)",
-        "background": "#1e1e1e",
-        "surface": "#252526",
-        "text": "#cccccc",
-        "border": "#3c3c3c",
-    },
-    "light": {
-        "label": "Light White",
-        "background": "#ffffff",
-        "surface": "#ffffff",
-        "text": "#111111",
-        "border": "#d0d7de",
-    },
-    "warm": {
-        "label": "Warm Cream",
-        "background": "#fff7ed",
-        "surface": "#fffaf3",
-        "text": "#1f1f1f",
-        "border": "#ead6bd",
-    },
-    "mung_bean": {
-        "label": "Mung Bean Green",
-        "background": "#c7edcc",
-        "surface": "#ddf4df",
-        "text": "#1f2d1f",
-        "border": "#9fc9a4",
-    },
-    "sakura": {
-        "label": "Sakura Pink",
-        "background": "#f8d7df",
-        "surface": "#fde8ed",
-        "text": "#2d1f25",
-        "border": "#e5a8b8",
-    },
-    "cool": {
-        "label": "Cool Blue",
-        "background": "#eff6ff",
-        "surface": "#f8fbff",
-        "text": "#111827",
-        "border": "#bfdbfe",
-    },
-    "gray": {
-        "label": "Light Gray",
-        "background": "#f3f4f6",
-        "surface": "#ffffff",
-        "text": "#111827",
-        "border": "#d1d5db",
-    },
-    "dark": {
-        "label": "Dark Slate",
-        "background": "#1f2937",
-        "surface": "#111827",
-        "text": "#f9fafb",
-        "border": "#4b5563",
-    },
-}
-DEFAULT_KEY_BINDINGS = {
-    "focus_search": "Ctrl+F",
-    "clear_search": "Esc",
-    "select_root": "Ctrl+O",
-    "pin_folder": "Ctrl+P",
-    "copy_file": "Ctrl+C",
-    "cut_file": "Ctrl+X",
-    "paste_file": "Ctrl+V",
-    "delete_file": "Del",
-    "scroll_folders_left": "A",
-    "scroll_folders_right": "D",
-    "scroll_files_up": "W",
-    "scroll_files_down": "S",
-}
-KEY_BINDING_LABELS = {
-    "focus_search": "Focus search box",
-    "clear_search": "Clear search",
-    "select_root": "Select root folder",
-    "pin_folder": "Pin/unpin folder",
-    "copy_file": "Copy selected file",
-    "cut_file": "Cut selected file",
-    "paste_file": "Paste into current folder",
-    "delete_file": "Delete selected file",
-    "scroll_folders_left": "Folder columns left",
-    "scroll_folders_right": "Folder columns right",
-    "scroll_files_up": "Hovered area up",
-    "scroll_files_down": "Hovered area down",
-}
-
-
-def _normalize_key_sequence(value: object) -> str:
-    sequence = QKeySequence(str(value or ""))
-    normalized = sequence.toString(QKeySequence.SequenceFormat.PortableText)
-    if normalized == "Backspace":
-        return ""
-    return normalized
-
-
-class SearchSettingsDialog(QDialog):
-    def __init__(
-        self,
-        search_mode: str,
-        debounce_ms: int,
-        results_page_size: int,
-        show_folder_match_counts: bool,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Search Settings")
-
-        self.mode_input = QComboBox()
-        self.mode_input.addItem("Search while typing (debounced)", SEARCH_MODE_DEBOUNCED)
-        self.mode_input.addItem("Search when pressing Enter", SEARCH_MODE_ENTER)
-        self.mode_input.setCurrentIndex(
-            self.mode_input.findData(search_mode)
-            if self.mode_input.findData(search_mode) >= 0
-            else self.mode_input.findData(DEFAULT_SEARCH_MODE)
-        )
-
-        self.debounce_input = QSpinBox()
-        self.debounce_input.setRange(50, 5000)
-        self.debounce_input.setSingleStep(50)
-        self.debounce_input.setSuffix(" ms")
-        self.debounce_input.setValue(debounce_ms)
-
-        self.results_page_size_input = QSpinBox()
-        self.results_page_size_input.setRange(50, 5000)
-        self.results_page_size_input.setSingleStep(50)
-        self.results_page_size_input.setSuffix(" results")
-        self.results_page_size_input.setValue(results_page_size)
-
-        self.show_folder_match_counts_input = QCheckBox("Show matching file counts beside folders")
-        self.show_folder_match_counts_input.setChecked(show_folder_match_counts)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        layout = QFormLayout(self)
-        layout.addRow("Search mode", self.mode_input)
-        layout.addRow("Debounce delay", self.debounce_input)
-        layout.addRow("Results per page", self.results_page_size_input)
-        layout.addRow("Folder counts", self.show_folder_match_counts_input)
-        layout.addWidget(buttons)
-
-    def values(self) -> tuple[str, int, int, bool]:
-        return (
-            str(self.mode_input.currentData()),
-            int(self.debounce_input.value()),
-            int(self.results_page_size_input.value()),
-            self.show_folder_match_counts_input.isChecked(),
-        )
-
-
-class ThemeSettingsDialog(QDialog):
-    preview_requested = Signal(str)
-
-    def __init__(self, theme_name: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Theme Settings")
-        self.resize(420, 360)
-
-        self.theme_list = QListWidget()
-        self.theme_list.setMinimumHeight(240)
-        for theme_id, theme in THEMES.items():
-            item = QListWidgetItem(theme["label"])
-            item.setData(Qt.ItemDataRole.UserRole, theme_id)
-            self.theme_list.addItem(item)
-            if theme_id == theme_name:
-                self.theme_list.setCurrentItem(item)
-        if self.theme_list.currentItem() is None:
-            self._select_theme(DEFAULT_THEME)
-        self.theme_list.currentItemChanged.connect(self._handle_theme_changed)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        default_button = buttons.addButton("Default", QDialogButtonBox.ButtonRole.ResetRole)
-        default_button.clicked.connect(self._select_default_theme)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-        layout = QFormLayout(self)
-        layout.addRow("Background theme", self.theme_list)
-        layout.addWidget(buttons)
-
-    def value(self) -> str:
-        item = self.theme_list.currentItem()
-        return str(item.data(Qt.ItemDataRole.UserRole)) if item else DEFAULT_THEME
-
-    def _select_default_theme(self) -> None:
-        self._select_theme(DEFAULT_THEME)
-
-    def _select_theme(self, theme_name: str) -> None:
-        for row_index in range(self.theme_list.count()):
-            item = self.theme_list.item(row_index)
-            if item.data(Qt.ItemDataRole.UserRole) == theme_name:
-                self.theme_list.setCurrentItem(item)
-                return
-
-    def _handle_theme_changed(
-        self,
-        current: QListWidgetItem | None,
-        _previous: QListWidgetItem | None,
-    ) -> None:
-        if current is not None:
-            self.preview_requested.emit(str(current.data(Qt.ItemDataRole.UserRole)))
-
-
-class ShortcutKeySequenceEdit(QKeySequenceEdit):
-    def keyPressEvent(self, event) -> None:  # type: ignore[override]
-        if event.key() == Qt.Key.Key_Backspace:
-            self.clear()
-            event.accept()
-            return
-        super().keyPressEvent(event)
-
-
-class KeyboardSettingsDialog(QDialog):
-    def __init__(self, key_bindings: dict[str, str], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Keyboard Shortcuts")
-        self.inputs: dict[str, QKeySequenceEdit] = {}
-
-        layout = QFormLayout(self)
-        for action_id, label in KEY_BINDING_LABELS.items():
-            editor = ShortcutKeySequenceEdit(QKeySequence(key_bindings.get(action_id, "")))
-            self.inputs[action_id] = editor
-            layout.addRow(label, editor)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        reset_button = buttons.addButton("Reset Defaults", QDialogButtonBox.ButtonRole.ResetRole)
-        reset_button.clicked.connect(self._reset_defaults)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def values(self) -> dict[str, str]:
-        return {
-            action_id: _normalize_key_sequence(editor.keySequence().toString(QKeySequence.SequenceFormat.PortableText))
-            for action_id, editor in self.inputs.items()
-        }
-
-    def accept(self) -> None:
-        duplicate_shortcut = self._duplicate_shortcut()
-        if duplicate_shortcut:
-            QMessageBox.warning(
-                self,
-                "Shortcut Conflict",
-                f"'{duplicate_shortcut}' is assigned to more than one action.\n\n"
-                "Please choose a different shortcut or clear one of the bindings.",
-            )
-            return
-
-        super().accept()
-
-    def _reset_defaults(self) -> None:
-        for action_id, editor in self.inputs.items():
-            editor.setKeySequence(QKeySequence(DEFAULT_KEY_BINDINGS[action_id]))
-
-    def _duplicate_shortcut(self) -> str:
-        seen: set[str] = set()
-        for shortcut in self.values().values():
-            if not shortcut:
-                continue
-            if shortcut in seen:
-                return shortcut
-            seen.add(shortcut)
-        return ""
 
 
 class ScanWorker(QObject):
@@ -370,6 +112,9 @@ class MainWindow(QMainWindow):
         self.show_folder_match_counts = bool(
             self.app_settings.get("show_folder_match_counts", True)
         )
+        self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
+            self.app_settings.get("keyboard_folder_refresh", DEFAULT_KEYBOARD_FOLDER_REFRESH)
+        )
         self.theme_name = self._normalize_theme_name(self.app_settings.get("theme", DEFAULT_THEME))
         self.keyboard_mode_enabled = bool(self.app_settings.get("keyboard_mode_enabled", False))
         self.key_bindings = self._load_key_bindings()
@@ -389,6 +134,11 @@ class MainWindow(QMainWindow):
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
         self.last_search_elapsed_ms: float | None = None
+        self.tabs: list[BookmarkTab] = []
+        self.active_tab_index = -1
+        self.active_tab_id = ""
+        self._pending_tab_restore: BookmarkTab | None = None
+        self._tab_activation_in_progress = False
 
         self.select_root_button = QPushButton("Select Root Folder")
         self.pin_folder_button = QPushButton("Pin/Unpin Folder")
@@ -404,6 +154,18 @@ class MainWindow(QMainWindow):
         self.root_label = QLabel("No root selected")
         self.search_input = QLineEdit()
         self._update_search_placeholder()
+        self.save_tab_button = QPushButton("☆")
+        self.save_tab_button.setObjectName("saveTabButton")
+        self.save_tab_button.setFixedWidth(32)
+        self.save_tab_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.save_tab_button.setToolTip("Save current location to tabs (stored in bookmarks.json)")
+        self.search_box_container = QWidget()
+        search_box_layout = QHBoxLayout(self.search_box_container)
+        search_box_layout.setContentsMargins(0, 0, 0, 0)
+        search_box_layout.setSpacing(4)
+        search_box_layout.addWidget(self.search_input, stretch=1)
+        search_box_layout.addWidget(self.save_tab_button)
+        self.bookmark_tab_bar = BookmarkTabBar()
         self.column_view = ColumnView(self._load_child_folders)
         self.file_table = FileTable()
         self._apply_shortcut_labels()
@@ -412,7 +174,16 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._connect_signals()
         self._apply_theme()
-        self._load_last_root_if_available()
+        self._load_bookmarks()
+        if self.tabs:
+            self._sync_tab_bar()
+            visible = self._visible_tabs()
+            if visible and self.active_tab_id:
+                visible_index = self._visible_index_for_id(self.active_tab_id)
+                if visible_index >= 0:
+                    self._activate_tab(visible_index, initial=True)
+        else:
+            self._load_last_root_if_available()
 
     def _build_ui(self) -> None:
         self._build_menu()
@@ -422,6 +193,7 @@ class MainWindow(QMainWindow):
             self.keyboard_mode_button,
             self.previous_results_button,
             self.next_results_button,
+            self.save_tab_button,
         ):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -430,18 +202,20 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.pin_folder_button)
         toolbar.addWidget(self.keyboard_mode_button)
         toolbar.addWidget(self.scope_label)
-        toolbar.addWidget(self.search_input, stretch=1)
+        toolbar.addWidget(self.search_box_container, stretch=1)
         toolbar.addWidget(self.previous_results_button)
         toolbar.addWidget(self.next_results_button)
         toolbar.addWidget(self.results_page_label)
 
         splitter = QSplitter()
+        splitter.setChildrenCollapsible(False)
         splitter.addWidget(self.column_view)
         splitter.addWidget(self.file_table)
         splitter.setSizes([700, 500])
 
         layout = QVBoxLayout()
         layout.addLayout(toolbar)
+        layout.addWidget(self.bookmark_tab_bar)
         layout.addWidget(splitter, stretch=1)
 
         central = QWidget()
@@ -454,13 +228,8 @@ class MainWindow(QMainWindow):
         self.status.showMessage("Choose a root folder to scan.")
 
     def _build_menu(self) -> None:
-        settings_menu = self.menuBar().addMenu("Settings")
-        search_settings_action = settings_menu.addAction("Search Settings...")
-        search_settings_action.triggered.connect(self._open_search_settings)
-        theme_settings_action = settings_menu.addAction("Theme Settings...")
-        theme_settings_action.triggered.connect(self._open_theme_settings)
-        keyboard_settings_action = settings_menu.addAction("Keyboard Shortcuts...")
-        keyboard_settings_action.triggered.connect(self._open_keyboard_settings)
+        settings_action = self.menuBar().addAction("Settings")
+        settings_action.triggered.connect(self._open_settings)
 
     def _connect_signals(self) -> None:
         self.select_root_button.clicked.connect(self.select_root_folder)
@@ -470,13 +239,28 @@ class MainWindow(QMainWindow):
         self.next_results_button.clicked.connect(self._show_next_results_page)
         self.search_input.textChanged.connect(self._handle_search_changed)
         self.search_input.returnPressed.connect(self._apply_search_from_enter)
+        self.save_tab_button.clicked.connect(self._save_current_location_to_tabs)
+        self.bookmark_tab_bar.current_changed.connect(self._on_tab_bar_current_changed)
+        self.bookmark_tab_bar.tab_clicked.connect(self._on_tab_bar_clicked)
+        self.bookmark_tab_bar.tab_close_requested.connect(self._close_tab)
+        self.bookmark_tab_bar.tab_delete_requested.connect(self._delete_tab)
+        self.bookmark_tab_bar.tab_delete_by_id_requested.connect(self._delete_tab_by_id)
+        self.bookmark_tab_bar.copy_path_requested.connect(self._copy_tab_path)
+        self.bookmark_tab_bar.copy_path_by_id_requested.connect(self._copy_tab_path_by_id)
+        self.bookmark_tab_bar.reopen_tab_requested.connect(self._reopen_tab)
+        self.bookmark_tab_bar.new_tab_requested.connect(self._create_tab_from_current_location)
+        self.bookmark_tab_bar.tabs_reordered.connect(self._on_tabs_reordered)
+        self.bookmark_tab_bar.rename_requested.connect(self._rename_tab)
         self.column_view.folder_selected.connect(self._handle_folder_selected)
+        self.column_view.bookmark_requested.connect(self._save_folder_to_tabs)
+        self.column_view.copy_path_requested.connect(self._copy_path_to_clipboard)
         self.file_table.add_file_requested.connect(self._add_file_to_selected_folder)
         self.file_table.copy_requested.connect(lambda paths: self._set_clipboard("copy", paths))
         self.file_table.cut_requested.connect(lambda paths: self._set_clipboard("cut", paths))
         self.file_table.delete_requested.connect(self._delete_selected_files)
         self.file_table.folder_open_requested.connect(self._navigate_to_folder)
         self.file_table.paste_requested.connect(self._paste_into_selected_folder)
+        self.file_table.copy_path_requested.connect(self._copy_path_to_clipboard)
         self.search_timer.timeout.connect(self._apply_search_from_input)
         QApplication.instance().installEventFilter(self)
         self._update_scope_controls()
@@ -491,6 +275,16 @@ class MainWindow(QMainWindow):
             return super().eventFilter(watched, event)
         if QApplication.activeModalWidget() is not None:
             return super().eventFilter(watched, event)
+
+        if (
+            not self._text_input_has_focus()
+            and self._keyboard_folder_refresh_on_enter()
+            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)  # type: ignore[attr-defined]
+        ):
+            if self.column_view.commit_active_column_selection():
+                self.status.showMessage("Folder selection applied.")
+                event.accept()
+                return True
 
         physical_action_id = self._keyboard_mode_physical_action(event)
         if physical_action_id:
@@ -548,7 +342,7 @@ class MainWindow(QMainWindow):
             self.start_scan(selected)
 
     def _action_for_shortcut(self, shortcut: str) -> str:
-        normalized = _normalize_key_sequence(shortcut)
+        normalized = normalize_key_sequence(shortcut)
         for action_id, binding in self.key_bindings.items():
             if binding and binding == normalized:
                 return action_id
@@ -567,6 +361,7 @@ class MainWindow(QMainWindow):
             "focus_search": self._focus_search_box,
             "clear_search": self._clear_search,
             "select_root": self.select_root_folder,
+            "new_tab": self._create_tab_from_current_location,
             "pin_folder": self._toggle_pin_folder,
             "copy_file": self._copy_selected_file,
             "cut_file": self._cut_selected_file,
@@ -584,23 +379,40 @@ class MainWindow(QMainWindow):
         return True
 
     def _run_keyboard_mode_navigation(self, action_id: str, is_auto_repeat: bool) -> bool:
+        commit_folder = self._keyboard_folder_navigation_commit()
         if action_id == "scroll_folders_left":
             moved = self.column_view.leave_current_folder()
         elif action_id == "scroll_folders_right":
             moved = self.column_view.enter_selected_folder()
         elif action_id == "scroll_files_up":
             moved = self.column_view.select_previous_folder(
-                animate_child_preview=not is_auto_repeat
+                animate_child_preview=not is_auto_repeat,
+                commit=commit_folder,
             )
         elif action_id == "scroll_files_down":
             moved = self.column_view.select_next_folder(
-                animate_child_preview=not is_auto_repeat
+                animate_child_preview=not is_auto_repeat,
+                commit=commit_folder,
             )
         else:
             return False
 
         if not moved:
             self.status.showMessage("No folder to select in that direction.")
+        elif not commit_folder:
+            self.status.showMessage("Folder highlighted. Press Enter to refresh results.")
+        return True
+
+    def _keyboard_folder_refresh_on_enter(self) -> bool:
+        return (
+            self.keyboard_mode_enabled
+            and bool(self.active_search_query.strip())
+            and self.keyboard_folder_refresh == KEYBOARD_FOLDER_REFRESH_ON_ENTER
+        )
+
+    def _keyboard_folder_navigation_commit(self) -> bool:
+        if self._keyboard_folder_refresh_on_enter():
+            return False
         return True
 
     @Slot(bool)
@@ -680,11 +492,15 @@ class MainWindow(QMainWindow):
     def _text_input_has_focus(self) -> bool:
         return isinstance(self.focusWidget(), QLineEdit)
 
-    def start_scan(self, root_path: str) -> None:
+    def start_scan(self, root_path: str, *, restore_tab: BookmarkTab | None = None) -> None:
         if self.scan_thread is not None:
             return
 
         normalized_root = normalize_path(root_path)
+        self._pending_tab_restore = restore_tab
+        db_path = database_path_for_root(normalized_root)
+        self.indexer = FileIndexer(db_path)
+        self.search_service = SearchService(self.indexer)
         self.select_root_button.setEnabled(False)
         self.search_input.setEnabled(False)
         self.status.showMessage(f"Scanning {normalized_root} ...")
@@ -716,14 +532,25 @@ class MainWindow(QMainWindow):
     def _handle_scan_finished(self, result: ScanResult) -> None:
         self.search_service.clear_cache()
         self.root_path = result.root_path
-        self.selected_folder = result.root_path
-        self.pinned_folder_path = ""
         self.root_label.setText(result.root_path)
         self._save_settings()
-        self.column_view.set_root(result.root_path)
-        if self.keyboard_mode_enabled:
-            self.column_view.ensure_keyboard_selection()
-        self._refresh_files()
+
+        pending_tab = self._pending_tab_restore
+        self._pending_tab_restore = None
+
+        if pending_tab is not None:
+            self.pinned_folder_path = ""
+            self.column_view.set_pinned_path("")
+            self._apply_tab_state(pending_tab)
+            self._update_active_tab_ui()
+        else:
+            self.selected_folder = result.root_path
+            self.pinned_folder_path = ""
+            self.column_view.set_root(result.root_path)
+            if self.keyboard_mode_enabled:
+                self.column_view.ensure_keyboard_selection()
+            self._refresh_files()
+
         self._update_scope_controls()
 
         message = (
@@ -736,6 +563,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _handle_scan_failed(self, message: str) -> None:
+        self._pending_tab_restore = None
         self.status.showMessage(f"Scan failed: {message}")
 
     @Slot()
@@ -909,6 +737,428 @@ class MainWindow(QMainWindow):
         self._update_scope_controls()
         self.status.showMessage(f"Opened folder: {folder_path}")
 
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._save_bookmarks()
+        super().closeEvent(event)
+
+    def _load_bookmarks(self) -> None:
+        tabs, active_tab_id = load_bookmarks()
+        self.tabs = tabs
+        self.active_tab_id = active_tab_id
+        self.active_tab_index = -1
+        if not self.tabs:
+            return
+
+        active_tab = self._tab_by_id(self.active_tab_id)
+        visible = self._visible_tabs()
+        if active_tab is None or not active_tab.open:
+            if visible:
+                self.active_tab_id = visible[0].id
+            else:
+                self.active_tab_id = ""
+
+    def _visible_tabs(self) -> list[BookmarkTab]:
+        return [tab for tab in self.tabs if tab.open]
+
+    def _closed_tabs(self) -> list[BookmarkTab]:
+        return [tab for tab in self.tabs if not tab.open]
+
+    def _tab_by_id(self, tab_id: str) -> BookmarkTab | None:
+        if not tab_id:
+            return None
+        for tab in self.tabs:
+            if tab.id == tab_id:
+                return tab
+        return None
+
+    def _visible_index_for_id(self, tab_id: str) -> int:
+        for index, tab in enumerate(self._visible_tabs()):
+            if tab.id == tab_id:
+                return index
+        return -1
+
+    def _visible_tab_at(self, visible_index: int) -> BookmarkTab | None:
+        visible = self._visible_tabs()
+        if 0 <= visible_index < len(visible):
+            return visible[visible_index]
+        return None
+
+    def _sync_tab_bar(self) -> None:
+        visible = self._visible_tabs()
+        self.bookmark_tab_bar.set_tabs(visible)
+        self.bookmark_tab_bar.set_closed_tabs(self._closed_tabs())
+        visible_index = self._visible_index_for_id(self.active_tab_id)
+        if visible_index >= 0:
+            self.active_tab_index = visible_index
+            self.bookmark_tab_bar.set_current_index(visible_index)
+        else:
+            self.active_tab_index = -1
+
+    def _save_bookmarks(self) -> None:
+        save_bookmarks(self.tabs, self.active_tab_id)
+
+    def _switch_indexer_for_root(self, root_path: str) -> bool:
+        normalized_root = normalize_path(root_path)
+        db_path = database_path_for_root(normalized_root)
+        if not db_path.exists():
+            legacy_path = database_path()
+            last_root = str(self.app_settings.get("last_root", "") or "")
+            if legacy_path.exists() and normalize_path(last_root) == normalized_root:
+                db_path = legacy_path
+
+        if not db_path.exists():
+            return False
+
+        self.indexer = FileIndexer(db_path)
+        self.search_service = SearchService(self.indexer)
+        return self.indexer.get_file_count() > 0
+
+    def _confirm_root_switch(self, tab: BookmarkTab) -> bool | None:
+        message = (
+            "This tab uses a different root directory:\n\n"
+            f"{tab.root_path}\n\n"
+            "Switching will trigger a rescan. Continue?"
+        )
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Different Root Directory")
+        dialog.setText(message)
+        dialog.setStandardButtons(
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel
+        )
+        dialog.setDefaultButton(QMessageBox.StandardButton.Yes)
+        result = dialog.exec()
+        if result == QMessageBox.StandardButton.Yes:
+            return True
+        if result == QMessageBox.StandardButton.No:
+            return False
+        return None
+
+    def _clear_pin_for_tab_switch(self) -> None:
+        if not self.pinned_folder_path:
+            return
+        self.pinned_folder_path = ""
+        self.search_result_offset = 0
+        self.column_view.set_pinned_path("")
+        self._update_scope_controls()
+
+    def _apply_tab_state(self, tab: BookmarkTab) -> None:
+        target_root = normalize_path(tab.root_path)
+        folder_path = normalize_path(tab.folder_path)
+        self.root_path = target_root
+        self.root_label.setText(target_root)
+
+        self.selected_folder = folder_path
+        self.search_result_offset = 0
+        if normalize_path(self.column_view.root_path) != target_root:
+            self.column_view.set_root(target_root, emit_selection=False)
+        self.column_view.rebuild_to_path(folder_path)
+
+        self.search_input.blockSignals(True)
+        self.search_input.setText(tab.search_query)
+        self.search_input.blockSignals(False)
+        self._apply_search(tab.search_query, show_status=False)
+
+        if self.keyboard_mode_enabled:
+            self.column_view.ensure_keyboard_selection()
+        self._update_scope_controls()
+
+    def _update_active_tab_ui(self) -> None:
+        visible_index = self._visible_index_for_id(self.active_tab_id)
+        if visible_index < 0:
+            self.active_tab_index = -1
+            return
+        self.active_tab_index = visible_index
+        self.bookmark_tab_bar.set_current_index(visible_index)
+
+    def _is_at_tab_location(self, tab: BookmarkTab) -> bool:
+        if normalize_path(self.root_path or "") != normalize_path(tab.root_path):
+            return False
+        if normalize_path(self.selected_folder or "") != normalize_path(tab.folder_path):
+            return False
+        return self.active_search_query.strip() == tab.search_query.strip()
+
+    def _activate_tab(self, visible_index: int, *, initial: bool = False) -> None:
+        tab = self._visible_tab_at(visible_index)
+        if tab is None:
+            return
+        if self._tab_activation_in_progress:
+            return
+        if (
+            not initial
+            and tab.id == self.active_tab_id
+            and self._is_at_tab_location(tab)
+        ):
+            return
+
+        previous_id = self.active_tab_id
+        self._clear_pin_for_tab_switch()
+
+        current_root = normalize_path(self.root_path) if self.root_path else ""
+        target_root = normalize_path(tab.root_path)
+
+        self._tab_activation_in_progress = True
+        try:
+            if current_root and current_root == target_root:
+                self.active_tab_id = tab.id
+                self._apply_tab_state(tab)
+                self._update_active_tab_ui()
+                self._save_bookmarks()
+                return
+
+            if self._switch_indexer_for_root(tab.root_path):
+                self.root_path = target_root
+                self.root_label.setText(target_root)
+                self.active_tab_id = tab.id
+                self._apply_tab_state(tab)
+                self._update_active_tab_ui()
+                self._save_settings()
+                self._save_bookmarks()
+                return
+
+            if initial:
+                self.active_tab_id = tab.id
+                self._update_active_tab_ui()
+                self.start_scan(tab.root_path, restore_tab=tab)
+                return
+
+            choice = self._confirm_root_switch(tab)
+            if choice is not True:
+                self.active_tab_id = previous_id
+                self._update_active_tab_ui()
+                if choice is False:
+                    self.status.showMessage("Tab switch cancelled.")
+                return
+
+            self.active_tab_id = tab.id
+            self._update_active_tab_ui()
+            self.start_scan(tab.root_path, restore_tab=tab)
+        finally:
+            self._tab_activation_in_progress = False
+
+    @Slot(int)
+    def _on_tab_bar_current_changed(self, visible_index: int) -> None:
+        if self._visible_tab_at(visible_index) is None:
+            return
+        self._activate_tab(visible_index)
+
+    @Slot(int)
+    def _on_tab_bar_clicked(self, visible_index: int) -> None:
+        if self._visible_tab_at(visible_index) is None:
+            return
+        self._activate_tab(visible_index)
+
+    @Slot(int, int)
+    def _on_tabs_reordered(self, from_index: int, to_index: int) -> None:
+        visible = self._visible_tabs()
+        if (
+            from_index < 0
+            or to_index < 0
+            or from_index >= len(visible)
+            or to_index >= len(visible)
+            or from_index == to_index
+        ):
+            return
+        tab = visible.pop(from_index)
+        visible.insert(to_index, tab)
+        self.tabs = visible + self._closed_tabs()
+        self._sync_tab_bar()
+        self._save_bookmarks()
+
+    @Slot(int, str)
+    def _rename_tab(self, visible_index: int, label: str) -> None:
+        tab = self._visible_tab_at(visible_index)
+        if tab is None:
+            return
+        tab.label = label.strip()
+        self._sync_tab_bar()
+        self._save_bookmarks()
+
+    @Slot(int)
+    def _close_tab(self, visible_index: int) -> None:
+        tab = self._visible_tab_at(visible_index)
+        if tab is None:
+            return
+
+        closing_active = tab.id == self.active_tab_id
+        tab.open = False
+        visible = self._visible_tabs()
+
+        if not visible:
+            self.active_tab_id = ""
+            self.active_tab_index = -1
+            self._sync_tab_bar()
+            self._save_bookmarks()
+            self.status.showMessage(
+                f"Closed tab: {tab.display_label()}. Reopen it from >> → Closed bookmarks."
+            )
+            return
+
+        if closing_active:
+            next_index = min(visible_index, len(visible) - 1)
+            next_tab = visible[next_index]
+            self.active_tab_id = next_tab.id
+            self._sync_tab_bar()
+            self._activate_tab(next_index)
+        else:
+            self._sync_tab_bar()
+
+        self._save_bookmarks()
+        self.status.showMessage(
+            f"Closed tab: {tab.display_label()}. Bookmark kept — reopen from >>."
+        )
+
+    @Slot(int)
+    def _delete_tab(self, visible_index: int) -> None:
+        tab = self._visible_tab_at(visible_index)
+        if tab is None:
+            return
+
+        response = QMessageBox.question(
+            self,
+            "Delete Tab",
+            f"Delete this saved tab permanently?\n\n{tab.folder_path}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        deleting_active = tab.id == self.active_tab_id
+        self.tabs = [saved_tab for saved_tab in self.tabs if saved_tab.id != tab.id]
+        visible = self._visible_tabs()
+
+        if not visible:
+            self.active_tab_id = ""
+            self.active_tab_index = -1
+            self._sync_tab_bar()
+            self._save_bookmarks()
+            self.status.showMessage(f"Deleted tab: {tab.display_label()}")
+            return
+
+        if deleting_active:
+            next_index = min(visible_index, len(visible) - 1)
+            self.active_tab_id = visible[next_index].id
+            self._sync_tab_bar()
+            self._activate_tab(next_index)
+        else:
+            self._sync_tab_bar()
+
+        self._save_bookmarks()
+        self.status.showMessage(f"Deleted tab: {tab.display_label()}")
+
+    @Slot(str)
+    def _reopen_tab(self, tab_id: str) -> None:
+        tab = self._tab_by_id(tab_id)
+        if tab is None or tab.open:
+            return
+
+        tab.open = True
+        self._sync_tab_bar()
+        visible_index = self._visible_index_for_id(tab.id)
+        if visible_index >= 0:
+            self._activate_tab(visible_index)
+        self._save_bookmarks()
+        self.status.showMessage(f"Reopened tab: {tab.display_label()}")
+
+    def _copy_path_to_clipboard(self, path: str) -> None:
+        if not path:
+            return
+        QGuiApplication.clipboard().setText(path)
+        self.status.showMessage(f"Copied full path: {path}")
+
+    def _copy_tab_path(self, visible_index: int) -> None:
+        tab = self._visible_tab_at(visible_index)
+        if tab is None:
+            return
+        self._copy_path_to_clipboard(tab.folder_path)
+
+    def _copy_tab_path_by_id(self, tab_id: str) -> None:
+        tab = self._tab_by_id(tab_id)
+        if tab is None:
+            return
+        self._copy_path_to_clipboard(tab.folder_path)
+
+    @Slot(str)
+    def _delete_tab_by_id(self, tab_id: str) -> None:
+        tab = self._tab_by_id(tab_id)
+        if tab is None:
+            return
+
+        response = QMessageBox.question(
+            self,
+            "Delete Tab",
+            f"Delete this saved tab permanently?\n\n{tab.folder_path}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if response != QMessageBox.StandardButton.Yes:
+            return
+
+        deleting_active = tab.id == self.active_tab_id
+        self.tabs = [saved_tab for saved_tab in self.tabs if saved_tab.id != tab_id]
+        visible = self._visible_tabs()
+
+        if not visible:
+            self.active_tab_id = ""
+            self.active_tab_index = -1
+            self._sync_tab_bar()
+            self._save_bookmarks()
+            self.status.showMessage(f"Deleted tab: {tab.display_label()}")
+            return
+
+        if deleting_active:
+            self.active_tab_id = visible[0].id
+            self._sync_tab_bar()
+            self._activate_tab(0)
+        else:
+            self._sync_tab_bar()
+
+        self._save_bookmarks()
+        self.status.showMessage(f"Deleted tab: {tab.display_label()}")
+
+    def _create_tab_from_current_location(self) -> None:
+        self._add_tab_from_state()
+
+    @Slot()
+    def _save_current_location_to_tabs(self) -> None:
+        self._add_tab_from_state()
+
+    @Slot(str)
+    def _save_folder_to_tabs(self, folder_path: str) -> None:
+        self._add_tab_from_state(folder_path=folder_path)
+
+    def _add_tab_from_state(
+        self,
+        *,
+        folder_path: str | None = None,
+        search_query: str | None = None,
+    ) -> None:
+        if not self.root_path:
+            self.status.showMessage("Select a root folder before saving a tab.")
+            return
+
+        folder = folder_path or self.selected_folder or self.root_path
+        search = self.active_search_query if search_query is None else search_query
+        normalized_root = normalize_path(self.root_path)
+        normalized_folder = normalize_path(folder)
+        normalized_search = search.strip()
+
+        tab = BookmarkTab(
+            root_path=normalized_root,
+            folder_path=normalized_folder,
+            search_query=normalized_search,
+        )
+        self.tabs.append(tab)
+        self.active_tab_id = tab.id
+        self._sync_tab_bar()
+        visible_index = self._visible_index_for_id(tab.id)
+        if visible_index >= 0:
+            self.bookmark_tab_bar.set_current_index(visible_index)
+        self._save_bookmarks()
+        self.status.showMessage(f"Saved tab: {tab.display_label()}")
+
     def _set_clipboard(self, operation: str, paths: list[str]) -> None:
         if not paths:
             self.status.showMessage("Select one or more files first.")
@@ -1059,55 +1309,99 @@ class MainWindow(QMainWindow):
         )
 
     @Slot()
-    def _open_search_settings(self) -> None:
-        dialog = SearchSettingsDialog(
+    def _open_settings(self) -> None:
+        applied_snapshot = self._capture_settings_snapshot()
+        dialog = SettingsDialog(
             self.search_mode,
             self.debounce_ms,
             self.results_page_size,
             self.show_folder_match_counts,
+            self.keyboard_folder_refresh,
+            self.theme_name,
+            self.key_bindings,
             self,
         )
+        dialog.preview_requested.connect(self._preview_theme)
+        dialog.apply_requested.connect(
+            lambda: self._handle_settings_apply(dialog, applied_snapshot)
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._restore_settings_snapshot(applied_snapshot)
+            self.status.showMessage("Settings canceled.")
             return
 
+        self._apply_settings_from_dialog(dialog)
+        self.status.showMessage("Settings saved.")
+
+    def _capture_settings_snapshot(self) -> dict[str, object]:
+        return {
+            "search_mode": self.search_mode,
+            "debounce_ms": self.debounce_ms,
+            "results_page_size": self.results_page_size,
+            "show_folder_match_counts": self.show_folder_match_counts,
+            "keyboard_folder_refresh": self.keyboard_folder_refresh,
+            "theme_name": self.theme_name,
+            "key_bindings": dict(self.key_bindings),
+        }
+
+    def _restore_settings_snapshot(self, snapshot: dict[str, object]) -> None:
+        self.search_mode = self._normalize_search_mode(snapshot["search_mode"])
+        self.debounce_ms = self._normalize_debounce_ms(snapshot["debounce_ms"])
+        self.results_page_size = self._normalize_results_page_size(snapshot["results_page_size"])
+        self.show_folder_match_counts = bool(snapshot["show_folder_match_counts"])
+        self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
+            snapshot["keyboard_folder_refresh"]
+        )
+        self.theme_name = self._normalize_theme_name(snapshot["theme_name"])
+        self.key_bindings = self._normalize_key_bindings(snapshot["key_bindings"])
+        self._apply_settings_effects(refresh_files=True, save_disk=False)
+
+    def _apply_settings_from_dialog(self, dialog: SettingsDialog) -> None:
         (
             self.search_mode,
             self.debounce_ms,
             self.results_page_size,
             self.show_folder_match_counts,
-        ) = dialog.values()
+            self.keyboard_folder_refresh,
+        ) = dialog.search_values()
         self.search_mode = self._normalize_search_mode(self.search_mode)
         self.debounce_ms = self._normalize_debounce_ms(self.debounce_ms)
         self.results_page_size = self._normalize_results_page_size(self.results_page_size)
+        self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
+            self.keyboard_folder_refresh
+        )
+        self.theme_name = self._normalize_theme_name(dialog.theme_value())
+        self.key_bindings = self._normalize_key_bindings(dialog.keyboard_values())
+        self._apply_settings_effects(refresh_files=True, save_disk=True)
+
+    def _handle_settings_apply(
+        self,
+        dialog: SettingsDialog,
+        applied_snapshot: dict[str, object],
+    ) -> None:
+        self._apply_settings_from_dialog(dialog)
+        applied_snapshot.clear()
+        applied_snapshot.update(self._capture_settings_snapshot())
+        if self.search_mode == SEARCH_MODE_DEBOUNCED:
+            self.status.showMessage(f"Settings applied. Search while typing ({self.debounce_ms} ms).")
+        else:
+            self.status.showMessage("Settings applied.")
+
+    def _apply_settings_effects(self, *, refresh_files: bool, save_disk: bool) -> None:
         self.search_result_offset = 0
         self._update_search_placeholder()
-        self._save_settings()
-        self.column_view.set_search_query(self.active_search_query)
-        self._refresh_files()
-
+        self._apply_theme()
+        self._apply_shortcut_labels()
+        if save_disk:
+            self._save_settings()
+        if refresh_files and self.root_path:
+            self.column_view.set_search_query(self.active_search_query)
+            self._refresh_files()
         if self.search_mode == SEARCH_MODE_DEBOUNCED:
-            self.status.showMessage(f"Search while typing enabled ({self.debounce_ms} ms).")
             if self.root_path:
                 self.search_timer.start(self.debounce_ms)
         else:
             self.search_timer.stop()
-            self.status.showMessage("Enter search enabled. Press Enter to apply search text.")
-
-    @Slot()
-    def _open_theme_settings(self) -> None:
-        original_theme_name = self.theme_name
-        dialog = ThemeSettingsDialog(self.theme_name, self)
-        dialog.preview_requested.connect(self._preview_theme)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            self.theme_name = original_theme_name
-            self._apply_theme()
-            self.status.showMessage("Theme preview canceled.")
-            return
-
-        self.theme_name = self._normalize_theme_name(dialog.value())
-        self._apply_theme()
-        self._save_settings()
-        self.status.showMessage(f"Theme applied: {THEMES[self.theme_name]['label']}")
 
     @Slot(str)
     def _preview_theme(self, theme_name: str) -> None:
@@ -1115,27 +1409,16 @@ class MainWindow(QMainWindow):
         self._apply_theme()
         self.status.showMessage(f"Previewing theme: {THEMES[self.theme_name]['label']}")
 
-    @Slot()
-    def _open_keyboard_settings(self) -> None:
-        dialog = KeyboardSettingsDialog(self.key_bindings, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-
-        self.key_bindings = self._normalize_key_bindings(dialog.values())
-        self._apply_shortcut_labels()
-        self._save_settings()
-        self.status.showMessage("Keyboard shortcuts saved.")
-
     def _load_last_root_if_available(self) -> None:
         last_root = str(self.app_settings.get("last_root", "") or "")
         if not last_root:
             return
 
         self.root_label.setText(last_root)
-        if Path(last_root).exists() and self.indexer.get_file_count() > 0:
-            self.root_path = last_root
-            self.selected_folder = last_root
-            self.column_view.set_root(last_root)
+        if Path(last_root).exists() and self._switch_indexer_for_root(last_root):
+            self.root_path = normalize_path(last_root)
+            self.selected_folder = self.root_path
+            self.column_view.set_root(self.root_path)
             self.column_view.set_pinned_path("")
             if self.keyboard_mode_enabled:
                 self.column_view.ensure_keyboard_selection()
@@ -1157,6 +1440,7 @@ class MainWindow(QMainWindow):
         self.app_settings["debounce_ms"] = self.debounce_ms
         self.app_settings["results_page_size"] = self.results_page_size
         self.app_settings["show_folder_match_counts"] = self.show_folder_match_counts
+        self.app_settings["keyboard_folder_refresh"] = self.keyboard_folder_refresh
         self.app_settings["theme"] = self.theme_name
         self.app_settings["keyboard_mode_enabled"] = self.keyboard_mode_enabled
         self.app_settings["keyboard_shortcuts"] = self.key_bindings
@@ -1174,7 +1458,7 @@ class MainWindow(QMainWindow):
         normalized = {}
         for action_id, default_shortcut in DEFAULT_KEY_BINDINGS.items():
             if action_id in bindings:
-                normalized[action_id] = _normalize_key_sequence(bindings[action_id])
+                normalized[action_id] = normalize_key_sequence(bindings[action_id])
             else:
                 normalized[action_id] = default_shortcut
         return normalized
@@ -1293,12 +1577,44 @@ class MainWindow(QMainWindow):
                 border: 1px solid #4f9edb;
             }}
 
-            QListWidget,
-            QTableWidget,
+            QWidget#contentPanel,
+            QTableWidget#contentPanel {{
+                background: {theme["surface"]};
+                border: 1px solid {theme["border"]};
+            }}
+
+            QLabel#panelHeader {{
+                background: {theme["surface"]};
+                color: {theme["text"]};
+                padding: 4px 8px;
+                border-bottom: 1px solid {theme["border"]};
+            }}
+
             QHeaderView::section {{
                 background: {theme["surface"]};
                 color: {theme["text"]};
+                border: none;
+                border-bottom: 1px solid {theme["border"]};
+                border-right: 1px solid {theme["border"]};
+                padding: 4px 8px;
+            }}
+
+            QListWidget {{
+                background: {theme["surface"]};
+                color: {theme["text"]};
                 border: 1px solid {theme["border"]};
+            }}
+
+            QListWidget#folderColumnList {{
+                border: none;
+                border-right: 1px solid {theme["border"]};
+            }}
+
+            QTableWidget {{
+                background: {theme["surface"]};
+                color: {theme["text"]};
+                border: none;
+                alternate-background-color: {theme["alternate_surface"]};
             }}
 
             QListWidget::item:selected,
@@ -1379,8 +1695,157 @@ class MainWindow(QMainWindow):
             QScrollBar::sub-page {{
                 background: transparent;
             }}
+
+            QTabBar::tab {{
+                background: {theme["surface"]};
+                color: {theme["text"]};
+                border: 1px solid {theme["border"]};
+                border-bottom: none;
+                padding: 2px 20px 3px 10px;
+                margin-right: 2px;
+                min-height: 24px;
+            }}
+
+            QTabBar::tab:selected {{
+                background: {theme["background"]};
+                color: {theme["text"]};
+                border-bottom: 1px solid {theme["background"]};
+            }}
+
+            QTabBar::tab:selected:hover {{
+                color: {theme["text"]};
+            }}
+
+            QTabBar::tab:hover {{
+                background: #dbeeff;
+                color: #111111;
+            }}
+
+            QTabBar::close-button {{
+                width: 0;
+                height: 0;
+                border: none;
+                image: none;
+            }}
+
+            QToolButton#bookmarkTabCloseButton {{
+                color: {theme["text"]};
+                background: transparent;
+                border: none;
+                padding: 0;
+                margin: 0;
+                font-size: 13px;
+                font-weight: 700;
+            }}
+
+            QToolButton#bookmarkTabCloseButton:hover {{
+                background: rgba(0, 0, 0, 0.12);
+                color: {theme["text"]};
+                border-radius: 3px;
+            }}
+
+            QToolButton#bookmarkTabCloseButton:pressed {{
+                background: rgba(0, 0, 0, 0.2);
+                color: {theme["text"]};
+            }}
+
+            QPushButton#tabBarActionButton {{
+                background: {theme["surface"]};
+                color: {theme["text"]};
+                border: 1px solid {theme["border"]};
+                border-radius: 4px;
+                padding: 2px 4px;
+            }}
+
+            QPushButton#tabBarActionButton:hover {{
+                background: #dbeeff;
+                color: #111111;
+                border: 1px solid #7cb7e8;
+            }}
+
+            QPushButton#tabBarActionButton:pressed {{
+                background: #b7dcff;
+                color: #111111;
+                border: 1px solid #4f9edb;
+            }}
+
+            QFrame#tabOverflowPopup {{
+                background: {theme["surface"]};
+                border: 1px solid {theme["border"]};
+            }}
+
+            QListWidget#tabOverflowList {{
+                background: {theme["surface"]};
+                color: {theme["text"]};
+                border: none;
+                outline: none;
+            }}
+
+            QListWidget#tabOverflowList::item:selected {{
+                background: #cfe8ff;
+                color: #111111;
+            }}
+
+            QListWidget#tabOverflowList::item:hover {{
+                background: #dbeeff;
+                color: #111111;
+            }}
+
+            QPushButton#saveTabButton {{
+                font-size: 16px;
+                padding: 2px 4px;
+            }}
+
+            QListWidget#settingsNav {{
+                background: {theme["background"]};
+                border: none;
+                border-right: 1px solid {theme["border"]};
+                outline: none;
+                padding: 6px 0;
+            }}
+
+            QListWidget#settingsNav::item {{
+                padding: 6px 16px;
+                margin: 1px 8px;
+                border: none;
+                min-height: 22px;
+            }}
+
+            QListWidget#settingsNav::item:selected {{
+                background: #cfe8ff;
+                color: #111111;
+                border-radius: 4px;
+            }}
+
+            QListWidget#settingsNav::item:hover {{
+                background: #dbeeff;
+                color: #111111;
+                border-radius: 4px;
+            }}
+
+            QStackedWidget#settingsStack {{
+                background: {theme["surface"]};
+                border: none;
+            }}
+
+            QLabel#settingsPageTitle {{
+                font-size: 20px;
+                font-weight: 600;
+                padding-bottom: 8px;
+            }}
+
+            QWidget#settingsButtons {{
+                padding: 0;
+            }}
+
+            QWidget#settingsButtons QPushButton {{
+                min-width: 73px;
+                min-height: 25px;
+                padding: 5px 14px;
+            }}
             """
         )
+        self.bookmark_tab_bar.refresh_close_button_styles()
 
     def _normalize_search_mode(self, value: object) -> str:
         if value == SEARCH_MODE_ENTER:
@@ -1402,6 +1867,11 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             return DEFAULT_RESULTS_PAGE_SIZE
         return min(max(results_page_size, 50), 5000)
+
+    def _normalize_keyboard_folder_refresh(self, value: object) -> str:
+        if value == KEYBOARD_FOLDER_REFRESH_ON_ENTER:
+            return KEYBOARD_FOLDER_REFRESH_ON_ENTER
+        return DEFAULT_KEYBOARD_FOLDER_REFRESH
 
     def _update_search_placeholder(self) -> None:
         hint = "Search name or extension, e.g. report, .csv, png"
