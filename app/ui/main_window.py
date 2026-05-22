@@ -45,13 +45,21 @@ from PySide6.QtWidgets import (
 from app.core.bookmarks import BookmarkTab, load_bookmarks, save_bookmarks
 from app.core.file_ops import copy_file_to_folder, delete_file, move_file_to_folder
 from app.core.indexer import FileIndexer
+from app.core.index_watcher import IndexWatcher
 from app.core.paths import database_path_for_root, database_path, settings_path
-from app.core.scanner import FileScanner, ScanResult, normalize_path
+from app.core.scanner import FileScanner, ScanCancelledError, ScanResult, normalize_path
 from app.core.search import SearchService
+from app.core.search_constants import (
+    DEFAULT_SHOW_FOLDER_MATCH_COUNTS,
+    DEFAULT_WATCH_INDEX_CHANGES,
+    LARGE_INDEX_FILE_COUNT,
+    MIN_SEARCH_QUERY_LENGTH,
+)
 from app.ui.bookmark_tab_bar import BookmarkTabBar
 from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
 from app.ui.column_view import ColumnView
 from app.ui.file_table import FileTable
+from app.ui.scan_control_buttons import ScanPlayButton, ScanStopButton
 from app.ui.settings_constants import (
     DEFAULT_DEBOUNCE_MS,
     DEFAULT_KEY_BINDINGS,
@@ -77,19 +85,40 @@ class ScanWorker(QObject):
     progress = Signal(int, int)
     finished = Signal(object)
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, root_path: str, indexer: FileIndexer) -> None:
         super().__init__()
         self.root_path = root_path
         self.indexer = indexer
         self.scanner = FileScanner()
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
 
     @Slot()
     def run(self) -> None:
         try:
-            result = self.scanner.scan(self.root_path, self.progress.emit)
-            self.indexer.replace_index(result.files, result.folders)
+            result = self.scanner.scan(
+                self.root_path,
+                self.progress.emit,
+                cancel_check=lambda: self._cancel_requested,
+            )
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
+            self.indexer.replace_index(
+                result.files,
+                result.folders,
+                cancel_check=lambda: self._cancel_requested,
+            )
+            if self._cancel_requested:
+                self.cancelled.emit()
+                return
             self.finished.emit(result)
+        except ScanCancelledError:
+            self.cancelled.emit()
         except Exception as exc:  # Keep worker errors visible instead of killing the GUI thread.
             self.failed.emit(str(exc))
 
@@ -110,7 +139,16 @@ class MainWindow(QMainWindow):
             self.app_settings.get("results_page_size", DEFAULT_RESULTS_PAGE_SIZE)
         )
         self.show_folder_match_counts = bool(
-            self.app_settings.get("show_folder_match_counts", True)
+            self.app_settings.get(
+                "show_folder_match_counts",
+                DEFAULT_SHOW_FOLDER_MATCH_COUNTS,
+            )
+        )
+        self.watch_index_changes = bool(
+            self.app_settings.get(
+                "watch_index_changes",
+                DEFAULT_WATCH_INDEX_CHANGES,
+            )
         )
         self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
             self.app_settings.get("keyboard_folder_refresh", DEFAULT_KEYBOARD_FOLDER_REFRESH)
@@ -131,6 +169,7 @@ class MainWindow(QMainWindow):
         self.hover_scroll_animation: QPropertyAnimation | None = None
         self.scan_thread: QThread | None = None
         self.scan_worker: ScanWorker | None = None
+        self.index_watcher = IndexWatcher(self)
         self.search_timer = QTimer(self)
         self.search_timer.setSingleShot(True)
         self.last_search_elapsed_ms: float | None = None
@@ -138,6 +177,7 @@ class MainWindow(QMainWindow):
         self.active_tab_index = -1
         self.active_tab_id = ""
         self._pending_tab_restore: BookmarkTab | None = None
+        self._indexed_file_count = 0
         self._tab_activation_in_progress = False
 
         self.select_root_button = QPushButton("Select Root Folder")
@@ -149,9 +189,10 @@ class MainWindow(QMainWindow):
         self.previous_results_button = QPushButton("Previous")
         self.next_results_button = QPushButton("Next")
         self.results_page_label = QLabel("")
-        self.scope_label = QLabel("Scope: Root")
         self.search_status_label = QLabel("")
         self.root_label = QLabel("No root selected")
+        self.scan_play_button = ScanPlayButton()
+        self.scan_stop_button = ScanStopButton()
         self.search_input = QLineEdit()
         self._update_search_placeholder()
         self.save_tab_button = QPushButton("☆")
@@ -163,6 +204,8 @@ class MainWindow(QMainWindow):
         search_box_layout = QHBoxLayout(self.search_box_container)
         search_box_layout.setContentsMargins(0, 0, 0, 0)
         search_box_layout.setSpacing(4)
+        search_box_layout.addWidget(self.scan_play_button)
+        search_box_layout.addWidget(self.scan_stop_button)
         search_box_layout.addWidget(self.search_input, stretch=1)
         search_box_layout.addWidget(self.save_tab_button)
         self.bookmark_tab_bar = BookmarkTabBar()
@@ -184,6 +227,7 @@ class MainWindow(QMainWindow):
                     self._activate_tab(visible_index, initial=True)
         else:
             self._load_last_root_if_available()
+        self._update_scan_controls()
 
     def _build_ui(self) -> None:
         self._build_menu()
@@ -194,6 +238,8 @@ class MainWindow(QMainWindow):
             self.previous_results_button,
             self.next_results_button,
             self.save_tab_button,
+            self.scan_play_button,
+            self.scan_stop_button,
         ):
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -201,7 +247,6 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.select_root_button)
         toolbar.addWidget(self.pin_folder_button)
         toolbar.addWidget(self.keyboard_mode_button)
-        toolbar.addWidget(self.scope_label)
         toolbar.addWidget(self.search_box_container, stretch=1)
         toolbar.addWidget(self.previous_results_button)
         toolbar.addWidget(self.next_results_button)
@@ -237,6 +282,8 @@ class MainWindow(QMainWindow):
         self.keyboard_mode_button.toggled.connect(self._set_keyboard_mode_enabled)
         self.previous_results_button.clicked.connect(self._show_previous_results_page)
         self.next_results_button.clicked.connect(self._show_next_results_page)
+        self.scan_play_button.clicked.connect(self._start_root_scan)
+        self.scan_stop_button.clicked.connect(self._stop_background_tasks)
         self.search_input.textChanged.connect(self._handle_search_changed)
         self.search_input.returnPressed.connect(self._apply_search_from_enter)
         self.save_tab_button.clicked.connect(self._save_current_location_to_tabs)
@@ -261,6 +308,7 @@ class MainWindow(QMainWindow):
         self.file_table.folder_open_requested.connect(self._navigate_to_folder)
         self.file_table.paste_requested.connect(self._paste_into_selected_folder)
         self.file_table.copy_path_requested.connect(self._copy_path_to_clipboard)
+        self.index_watcher.changes_ready.connect(self._handle_index_changes)
         self.search_timer.timeout.connect(self._apply_search_from_input)
         QApplication.instance().installEventFilter(self)
         self._update_scope_controls()
@@ -340,6 +388,52 @@ class MainWindow(QMainWindow):
         selected = QFileDialog.getExistingDirectory(self, "Select Root Folder")
         if selected:
             self.start_scan(selected)
+
+    @Slot()
+    def _start_root_scan(self) -> None:
+        if self.scan_thread is not None:
+            return
+        if not self.root_path:
+            self.status.showMessage("Select a root folder first.")
+            return
+        self.start_scan(self.root_path)
+
+    @Slot()
+    def _stop_background_tasks(self) -> None:
+        self.search_timer.stop()
+        self._stop_index_watcher()
+
+        if self.scan_worker is None and self.scan_thread is None:
+            self.status.showMessage("Background tasks stopped.")
+            return
+
+        if self.scan_worker is not None:
+            self.scan_worker.request_cancel()
+
+        thread = self.scan_thread
+        if thread is not None and thread.isRunning():
+            thread.quit()
+            deadline = time.monotonic() + 3.0
+            while thread.isRunning() and time.monotonic() < deadline:
+                QApplication.processEvents()
+                thread.wait(100)
+            if thread.isRunning():
+                thread.terminate()
+                thread.wait(1000)
+
+        if self.scan_thread is not None:
+            self._pending_tab_restore = None
+            self._cleanup_scan_thread()
+            if self.root_path:
+                self._switch_indexer_for_root(self.root_path)
+            self.status.showMessage("Scan stopped.")
+
+    @Slot()
+    def _handle_scan_cancelled(self) -> None:
+        self._pending_tab_restore = None
+        if self.root_path:
+            self._switch_indexer_for_root(self.root_path)
+        self.status.showMessage("Scan stopped.")
 
     def _action_for_shortcut(self, shortcut: str) -> str:
         normalized = normalize_key_sequence(shortcut)
@@ -496,6 +590,7 @@ class MainWindow(QMainWindow):
         if self.scan_thread is not None:
             return
 
+        self._stop_index_watcher()
         normalized_root = normalize_path(root_path)
         self._pending_tab_restore = restore_tab
         db_path = database_path_for_root(normalized_root)
@@ -513,13 +608,16 @@ class MainWindow(QMainWindow):
         worker.progress.connect(self._handle_scan_progress)
         worker.finished.connect(self._handle_scan_finished)
         worker.failed.connect(self._handle_scan_failed)
+        worker.cancelled.connect(self._handle_scan_cancelled)
         worker.finished.connect(lambda _result: thread.quit())
         worker.failed.connect(lambda _message: thread.quit())
+        worker.cancelled.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._cleanup_scan_thread)
 
         self.scan_thread = thread
         self.scan_worker = worker
+        self._update_scan_controls()
         thread.start()
 
     @Slot(int, int)
@@ -560,6 +658,8 @@ class MainWindow(QMainWindow):
         if result.errors:
             message += f" ({len(result.errors):,} skipped)"
         self.status.showMessage(message)
+        self._indexed_file_count = len(result.files)
+        self._start_index_watcher()
 
     @Slot(str)
     def _handle_scan_failed(self, message: str) -> None:
@@ -573,6 +673,7 @@ class MainWindow(QMainWindow):
         self.select_root_button.setEnabled(True)
         self.search_input.setEnabled(True)
         self._update_scope_controls()
+        self._update_scan_controls()
 
     @Slot(str)
     def _handle_search_changed(self, _query: str) -> None:
@@ -594,6 +695,14 @@ class MainWindow(QMainWindow):
 
     def _apply_search(self, query: str, show_status: bool = True) -> None:
         if not self.root_path:
+            return
+
+        stripped = query.strip()
+        if stripped and not SearchService.is_searchable(stripped):
+            if show_status:
+                self.status.showMessage(
+                    f"Enter at least {MIN_SEARCH_QUERY_LENGTH} characters to search."
+                )
             return
 
         self.search_timer.stop()
@@ -632,8 +741,12 @@ class MainWindow(QMainWindow):
             self.search_result_total = total
             self.file_table.set_results(results)
         else:
-            self.search_result_total = 0
-            files = self.search_service.files_in_folder(self.selected_folder)
+            files, total = self.search_service.files_in_folder(
+                self.selected_folder,
+                limit=self.results_page_size,
+                offset=self.search_result_offset,
+            )
+            self.search_result_total = total
             self.file_table.set_files(files)
         self._update_pagination_controls()
 
@@ -659,7 +772,7 @@ class MainWindow(QMainWindow):
             return self.search_service.child_folders(
                 parent_path,
                 query,
-                self.show_folder_match_counts,
+                self._folder_match_counts_enabled(),
             )
 
         if self._is_strict_ancestor(parent_path, self.pinned_folder_path):
@@ -675,7 +788,7 @@ class MainWindow(QMainWindow):
             return self.search_service.child_folders(
                 parent_path,
                 query,
-                self.show_folder_match_counts,
+                self._folder_match_counts_enabled(),
             )
 
         return []
@@ -738,6 +851,7 @@ class MainWindow(QMainWindow):
         self.status.showMessage(f"Opened folder: {folder_path}")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._stop_index_watcher()
         self._save_bookmarks()
         super().closeEvent(event)
 
@@ -811,7 +925,8 @@ class MainWindow(QMainWindow):
 
         self.indexer = FileIndexer(db_path)
         self.search_service = SearchService(self.indexer)
-        return self.indexer.get_file_count() > 0
+        self._indexed_file_count = self.indexer.get_file_count()
+        return self._indexed_file_count > 0
 
     def _confirm_root_switch(self, tab: BookmarkTab) -> bool | None:
         message = (
@@ -915,6 +1030,7 @@ class MainWindow(QMainWindow):
                 self._update_active_tab_ui()
                 self._save_settings()
                 self._save_bookmarks()
+                self._start_index_watcher()
                 return
 
             if initial:
@@ -1272,6 +1388,54 @@ class MainWindow(QMainWindow):
             self.column_view.set_search_query(self.active_search_query)
         self._refresh_files()
 
+    def _start_index_watcher(self) -> None:
+        if not self.root_path or not self.watch_index_changes:
+            return
+        if self._indexed_file_count > LARGE_INDEX_FILE_COUNT:
+            self.status.showMessage(
+                "File watching skipped for large indexes (>100k files)."
+            )
+            return
+        self.index_watcher.start(self.root_path, self.indexer)
+
+    def _stop_index_watcher(self) -> None:
+        self.index_watcher.stop()
+
+    @Slot(object)
+    def _handle_index_changes(self, affected_folders: set[str]) -> None:
+        if not self.root_path or not affected_folders:
+            return
+
+        self.search_service.clear_cache()
+        current_folder = self.selected_folder or self.root_path
+        if not self._index_change_affects_view(current_folder, affected_folders):
+            self.status.showMessage("Index updated from file changes.")
+            return
+
+        if self.active_search_query.strip():
+            self.column_view.set_search_query(self.active_search_query)
+            self._refresh_files()
+        else:
+            self.column_view.rebuild_to_path(current_folder)
+            self._refresh_files()
+        self.status.showMessage("Index updated from file changes.")
+
+    def _index_change_affects_view(
+        self,
+        current_folder: str,
+        affected_folders: set[str],
+    ) -> bool:
+        normalized_current = normalize_path(current_folder)
+        for folder in affected_folders:
+            normalized_folder = normalize_path(folder)
+            if normalized_folder == normalized_current:
+                return True
+            if self._is_same_or_descendant(normalized_current, normalized_folder):
+                return True
+            if self._is_same_or_descendant(normalized_folder, normalized_current):
+                return True
+        return False
+
     def _show_error(self, title: str, message: str) -> None:
         QMessageBox.warning(self, title, message)
         self.status.showMessage(message)
@@ -1316,6 +1480,7 @@ class MainWindow(QMainWindow):
             self.debounce_ms,
             self.results_page_size,
             self.show_folder_match_counts,
+            self.watch_index_changes,
             self.keyboard_folder_refresh,
             self.theme_name,
             self.key_bindings,
@@ -1339,6 +1504,7 @@ class MainWindow(QMainWindow):
             "debounce_ms": self.debounce_ms,
             "results_page_size": self.results_page_size,
             "show_folder_match_counts": self.show_folder_match_counts,
+            "watch_index_changes": self.watch_index_changes,
             "keyboard_folder_refresh": self.keyboard_folder_refresh,
             "theme_name": self.theme_name,
             "key_bindings": dict(self.key_bindings),
@@ -1349,6 +1515,9 @@ class MainWindow(QMainWindow):
         self.debounce_ms = self._normalize_debounce_ms(snapshot["debounce_ms"])
         self.results_page_size = self._normalize_results_page_size(snapshot["results_page_size"])
         self.show_folder_match_counts = bool(snapshot["show_folder_match_counts"])
+        self.watch_index_changes = bool(
+            snapshot.get("watch_index_changes", DEFAULT_WATCH_INDEX_CHANGES)
+        )
         self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
             snapshot["keyboard_folder_refresh"]
         )
@@ -1362,6 +1531,7 @@ class MainWindow(QMainWindow):
             self.debounce_ms,
             self.results_page_size,
             self.show_folder_match_counts,
+            self.watch_index_changes,
             self.keyboard_folder_refresh,
         ) = dialog.search_values()
         self.search_mode = self._normalize_search_mode(self.search_mode)
@@ -1397,6 +1567,10 @@ class MainWindow(QMainWindow):
         if refresh_files and self.root_path:
             self.column_view.set_search_query(self.active_search_query)
             self._refresh_files()
+        if self.watch_index_changes and self.root_path:
+            self._start_index_watcher()
+        else:
+            self._stop_index_watcher()
         if self.search_mode == SEARCH_MODE_DEBOUNCED:
             if self.root_path:
                 self.search_timer.start(self.debounce_ms)
@@ -1424,7 +1598,8 @@ class MainWindow(QMainWindow):
                 self.column_view.ensure_keyboard_selection()
             self._refresh_files()
             self._update_scope_controls()
-            self.status.showMessage("Loaded previous index. Select a folder to rescan.")
+            self._start_index_watcher()
+            self.status.showMessage("Loaded previous index. Use the scan button if files look out of date.")
 
     def _load_settings(self) -> dict[str, object]:
         try:
@@ -1440,6 +1615,7 @@ class MainWindow(QMainWindow):
         self.app_settings["debounce_ms"] = self.debounce_ms
         self.app_settings["results_page_size"] = self.results_page_size
         self.app_settings["show_folder_match_counts"] = self.show_folder_match_counts
+        self.app_settings["watch_index_changes"] = self.watch_index_changes
         self.app_settings["keyboard_folder_refresh"] = self.keyboard_folder_refresh
         self.app_settings["theme"] = self.theme_name
         self.app_settings["keyboard_mode_enabled"] = self.keyboard_mode_enabled
@@ -1796,6 +1972,35 @@ class MainWindow(QMainWindow):
                 padding: 2px 4px;
             }}
 
+            QPushButton#scanPlayButton,
+            QPushButton#scanStopButton {{
+                background: transparent;
+                border: none;
+                padding: 2px;
+                min-width: 28px;
+                max-width: 28px;
+                min-height: 28px;
+                max-height: 28px;
+            }}
+
+            QPushButton#scanPlayButton:hover,
+            QPushButton#scanStopButton:hover {{
+                background: {theme["alternate_surface"]};
+                border: none;
+            }}
+
+            QPushButton#scanPlayButton:pressed,
+            QPushButton#scanStopButton:pressed {{
+                background: {theme["border"]};
+                border: none;
+            }}
+
+            QPushButton#scanPlayButton:disabled,
+            QPushButton#scanStopButton:disabled {{
+                background: transparent;
+                border: none;
+            }}
+
             QListWidget#settingsNav {{
                 background: {theme["background"]};
                 border: none;
@@ -1899,32 +2104,44 @@ class MainWindow(QMainWindow):
         self.pin_folder_button.setChecked(is_pinned)
         self.pin_folder_button.blockSignals(False)
 
-        if is_pinned:
-            self.scope_label.setText(f"Scope: {Path(self.pinned_folder_path).name}")
-        else:
-            self.scope_label.setText("Scope: Root")
+    def _update_scan_controls(self) -> None:
+        scanning = self.scan_thread is not None
+        self.scan_play_button.setEnabled(not scanning and bool(self.root_path))
+        self.scan_stop_button.setEnabled(True)
+        self.scan_play_button.update()
+        self.scan_stop_button.update()
 
     def _update_pagination_controls(self) -> None:
-        has_search = bool(self.active_search_query.strip())
-        has_previous = has_search and self.search_result_offset > 0
+        if not self.selected_folder:
+            self.previous_results_button.setEnabled(False)
+            self.next_results_button.setEnabled(False)
+            self.results_page_label.setText("")
+            return
+
+        has_previous = self.search_result_offset > 0
         has_next = (
-            has_search
-            and self.search_result_offset + self.results_page_size < self.search_result_total
+            self.search_result_offset + self.results_page_size < self.search_result_total
         )
 
         self.previous_results_button.setEnabled(has_previous)
         self.next_results_button.setEnabled(has_next)
 
-        if not has_search or self.search_result_total == 0:
-            self.results_page_label.setText("")
+        if self.search_result_total == 0:
+            self.results_page_label.setText("0 items")
             return
 
         start = self.search_result_offset + 1
         end = min(self.search_result_offset + self.results_page_size, self.search_result_total)
         self.results_page_label.setText(f"{start:,}-{end:,} of {self.search_result_total:,}")
 
+    def _folder_match_counts_enabled(self) -> bool:
+        return (
+            self.show_folder_match_counts
+            and self._indexed_file_count <= LARGE_INDEX_FILE_COUNT
+        )
+
     def _with_folder_match_counts(self, folders: list[object], query: str) -> list[object]:
-        if not self.show_folder_match_counts or not query.strip():
+        if not self._folder_match_counts_enabled() or not query.strip():
             return folders
 
         counts = self.search_service.folder_match_counts(query)

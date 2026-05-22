@@ -13,6 +13,20 @@ def app_root_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def project_root_dir() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def resource_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return project_root_dir()
+
+
+def icons_dir() -> Path:
+    return resource_dir() / "assets" / "icons"
+
+
 def user_data_dir() -> Path:
     if not getattr(sys, "frozen", False):
         return app_root_dir()

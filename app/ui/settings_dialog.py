@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 SETTINGS_NAV_ITEM_HEIGHT = 35
 SETTINGS_NAV_ITEM_SPACING = 3
 
+from app.core.search_constants import DEFAULT_WATCH_INDEX_CHANGES
 from app.ui.settings_constants import (
     DEFAULT_DEBOUNCE_MS,
     DEFAULT_KEY_BINDINGS,
@@ -58,6 +59,7 @@ class SearchSettingsPage(QWidget):
         debounce_ms: int,
         results_page_size: int,
         show_folder_match_counts: bool,
+        watch_index_changes: bool,
         keyboard_folder_refresh: str,
         parent: QWidget | None = None,
     ) -> None:
@@ -90,6 +92,11 @@ class SearchSettingsPage(QWidget):
         self.show_folder_match_counts_input = QCheckBox("Show matching file counts beside folders")
         self.show_folder_match_counts_input.setChecked(show_folder_match_counts)
 
+        self.watch_index_changes_input = QCheckBox(
+            "Watch files and update index automatically (slow on large libraries)"
+        )
+        self.watch_index_changes_input.setChecked(watch_index_changes)
+
         self.keyboard_folder_refresh_input = QComboBox()
         self.keyboard_folder_refresh_input.addItem(
             "Refresh on each W/S key (default)",
@@ -110,6 +117,7 @@ class SearchSettingsPage(QWidget):
         form.addRow("Debounce delay", self.debounce_input)
         form.addRow("Results per page", self.results_page_size_input)
         form.addRow("Folder counts", self.show_folder_match_counts_input)
+        form.addRow("File watching", self.watch_index_changes_input)
         form.addRow("Keyboard W/S refresh", self.keyboard_folder_refresh_input)
 
         layout = QVBoxLayout(self)
@@ -118,12 +126,13 @@ class SearchSettingsPage(QWidget):
         layout.addLayout(form)
         layout.addStretch(1)
 
-    def values(self) -> tuple[str, int, int, bool, str]:
+    def values(self) -> tuple[str, int, int, bool, bool, str]:
         return (
             str(self.mode_input.currentData()),
             int(self.debounce_input.value()),
             int(self.results_page_size_input.value()),
             self.show_folder_match_counts_input.isChecked(),
+            self.watch_index_changes_input.isChecked(),
             str(self.keyboard_folder_refresh_input.currentData()),
         )
 
@@ -243,6 +252,7 @@ class SettingsDialog(QDialog):
         debounce_ms: int,
         results_page_size: int,
         show_folder_match_counts: bool,
+        watch_index_changes: bool,
         keyboard_folder_refresh: str,
         theme_name: str,
         key_bindings: dict[str, str],
@@ -266,6 +276,7 @@ class SettingsDialog(QDialog):
             debounce_ms,
             results_page_size,
             show_folder_match_counts,
+            watch_index_changes,
             keyboard_folder_refresh,
         )
         self.theme_page = ThemeSettingsPage(theme_name)
@@ -358,7 +369,7 @@ class SettingsDialog(QDialog):
             return
         super().accept()
 
-    def search_values(self) -> tuple[str, int, int, bool, str]:
+    def search_values(self) -> tuple[str, int, int, bool, bool, str]:
         return self.search_page.values()
 
     def theme_value(self) -> str:

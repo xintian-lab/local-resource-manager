@@ -34,6 +34,11 @@ class ScanResult:
 
 
 ProgressCallback = Callable[[int, int], None]
+CancelCallback = Callable[[], bool]
+
+
+class ScanCancelledError(Exception):
+    pass
 
 
 def normalize_path(path: Path | str) -> str:
@@ -46,6 +51,7 @@ class FileScanner:
         root_path: Path | str,
         progress_callback: ProgressCallback | None = None,
         progress_interval: int = 1000,
+        cancel_check: CancelCallback | None = None,
     ) -> ScanResult:
         started_at = time.perf_counter()
         root = Path(root_path).expanduser().resolve()
@@ -60,10 +66,14 @@ class FileScanner:
         scanned_entries = 0
 
         while stack:
+            if cancel_check and cancel_check():
+                raise ScanCancelledError()
             current_folder = stack.pop()
             try:
                 with os.scandir(current_folder) as entries:
                     for entry in entries:
+                        if cancel_check and cancel_check():
+                            raise ScanCancelledError()
                         scanned_entries += 1
                         try:
                             if entry.is_dir(follow_symlinks=False):
@@ -93,6 +103,8 @@ class FileScanner:
 
                         if progress_callback and scanned_entries % progress_interval == 0:
                             progress_callback(len(files), len(folders))
+                            if cancel_check and cancel_check():
+                                raise ScanCancelledError()
             except OSError as exc:
                 errors.append(f"{current_folder}: {exc}")
 

@@ -29,13 +29,27 @@ if (Test-Path $SpecFile) {
     Remove-Item $SpecFile -Force
 }
 
-& $Python -m PyInstaller `
-    --noconfirm `
-    --clean `
-    --windowed `
-    --onefile `
-    --name $AppName `
-    $EntryPoint
+$IconsDir = Join-Path $ProjectRoot "assets\icons"
+& $Python -c "from app.ui.app_icon import ensure_build_icons; ensure_build_icons()"
+$IconFile = Join-Path $IconsDir "app_icon.ico"
+$AddDataArg = "$(Join-Path $ProjectRoot 'assets\icons');assets/icons"
+
+$PyInstallerArgs = @(
+    "--noconfirm",
+    "--clean",
+    "--windowed",
+    "--onefile",
+    "--name", $AppName,
+    "--add-data", $AddDataArg
+)
+
+if (Test-Path $IconFile) {
+    $PyInstallerArgs += @("--icon", $IconFile)
+}
+
+$PyInstallerArgs += $EntryPoint
+
+& $Python -m PyInstaller @PyInstallerArgs
 
 Write-Host ""
 Write-Host "Build complete:" -ForegroundColor Green

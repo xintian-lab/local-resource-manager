@@ -4,6 +4,7 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from app.ui.app_icon import apply_app_icon
 from app.ui.main_window import MainWindow
 
 
@@ -12,6 +13,7 @@ def main() -> int:
     app.setApplicationName("Local Resource Manager")
 
     window = MainWindow()
+    apply_app_icon(app, window)
     window.resize(1200, 720)
     window.show()
 

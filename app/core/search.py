@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from app.core.indexer import FileIndexer
+from app.core.search_constants import is_searchable_query, LARGE_INDEX_FILE_COUNT
 
 
 class SearchService:
@@ -17,7 +18,7 @@ class SearchService:
         query: str = "",
         include_counts: bool = False,
     ) -> list[object]:
-        normalized = self.normalize(query)
+        normalized = self.effective_query(query)
         children = self.indexer.get_child_folders(parent_path)
         if not normalized:
             return children
@@ -38,8 +39,19 @@ class SearchService:
             for child in filtered_children
         ]
 
-    def files_in_folder(self, folder_path: str, query: str = "") -> list[sqlite3.Row]:
-        return self.indexer.get_files_in_folder(folder_path, self.normalize(query))
+    def files_in_folder(
+        self,
+        folder_path: str,
+        query: str = "",
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        return self.indexer.get_files_in_folder(
+            folder_path,
+            self.effective_query(query),
+            limit,
+            offset,
+        )
 
     def results_in_folder_tree(
         self,
@@ -50,7 +62,7 @@ class SearchService:
     ) -> tuple[list[dict[str, object]], int]:
         return self.indexer.search_results_in_folder_tree(
             folder_path,
-            self.normalize(query),
+            self.effective_query(query),
             limit,
             offset,
         )
@@ -58,13 +70,25 @@ class SearchService:
     def normalize(self, query: str) -> str:
         return query.strip().lower()
 
+    def effective_query(self, query: str) -> str:
+        normalized = self.normalize(query)
+        if not normalized or not is_searchable_query(normalized):
+            return ""
+        return normalized
+
+    @staticmethod
+    def is_searchable(query: str) -> bool:
+        return is_searchable_query(query)
+
     def clear_cache(self) -> None:
         self._visible_folder_cache.clear()
         self._folder_match_count_cache.clear()
 
     def folder_match_counts(self, query: str) -> dict[str, int]:
-        normalized = self.normalize(query)
+        normalized = self.effective_query(query)
         if not normalized:
+            return {}
+        if self.indexer.get_file_count() > LARGE_INDEX_FILE_COUNT:
             return {}
         if normalized in self._folder_match_count_cache:
             return self._folder_match_count_cache[normalized]

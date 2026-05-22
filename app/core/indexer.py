@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from app.core.paths import database_path
-from app.core.scanner import FileRecord, FolderRecord
+from app.core.scanner import FileRecord, FolderRecord, ScanCancelledError
+from app.core.search_constants import is_searchable_query
 
 
 DEFAULT_DB_PATH = database_path()
@@ -54,46 +55,66 @@ class FileIndexer:
         self,
         files: Iterable[FileRecord],
         folders: Iterable[FolderRecord],
+        cancel_check: Callable[[], bool] | None = None,
+        batch_size: int = 5000,
     ) -> None:
+        folder_rows = [(folder.path, folder.name, folder.parent_path) for folder in folders]
+        file_rows = [
+            (
+                file.name,
+                file.path,
+                file.folder_path,
+                file.extension,
+                file.size,
+                file.modified_time,
+            )
+            for file in files
+        ]
+
         with self._connect() as connection:
             connection.execute("BEGIN")
-            connection.execute("DELETE FROM files")
-            connection.execute("DELETE FROM folders")
-            connection.executemany(
-                """
-                INSERT INTO folders (path, name, parent_path)
-                VALUES (?, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET
-                    name = excluded.name,
-                    parent_path = excluded.parent_path
-                """,
-                ((folder.path, folder.name, folder.parent_path) for folder in folders),
-            )
-            connection.executemany(
-                """
-                INSERT INTO files (
-                    name,
-                    path,
-                    folder_path,
-                    extension,
-                    size,
-                    modified_time
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    (
-                        file.name,
-                        file.path,
-                        file.folder_path,
-                        file.extension,
-                        file.size,
-                        file.modified_time,
+            try:
+                connection.execute("DELETE FROM files")
+                connection.execute("DELETE FROM folders")
+
+                for start in range(0, len(folder_rows), batch_size):
+                    if cancel_check and cancel_check():
+                        raise ScanCancelledError()
+                    connection.executemany(
+                        """
+                        INSERT INTO folders (path, name, parent_path)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(path) DO UPDATE SET
+                            name = excluded.name,
+                            parent_path = excluded.parent_path
+                        """,
+                        folder_rows[start : start + batch_size],
                     )
-                    for file in files
-                ),
-            )
-            connection.commit()
+
+                for start in range(0, len(file_rows), batch_size):
+                    if cancel_check and cancel_check():
+                        raise ScanCancelledError()
+                    connection.executemany(
+                        """
+                        INSERT INTO files (
+                            name,
+                            path,
+                            folder_path,
+                            extension,
+                            size,
+                            modified_time
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        file_rows[start : start + batch_size],
+                    )
+
+                if cancel_check and cancel_check():
+                    raise ScanCancelledError()
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def get_child_folders(self, parent_path: str, query: str = "") -> list[sqlite3.Row]:
         if not query.strip():
@@ -175,7 +196,7 @@ class FileIndexer:
 
     def get_matching_folder_paths(self, query: str) -> list[str]:
         normalized = query.strip().lower()
-        if not normalized:
+        if not normalized or not is_searchable_query(normalized):
             return []
 
         like_term = f"%{normalized}%"
@@ -193,10 +214,11 @@ class FileIndexer:
             ]
 
     def get_matching_file_folder_paths(self, query: str) -> list[str]:
-        where_clause, params = self._file_match_clause(query)
-        if not where_clause:
+        normalized = query.strip().lower()
+        if not normalized or not is_searchable_query(normalized):
             return []
 
+        where_clause, params = self._file_match_clause(query)
         sql = f"""
             SELECT DISTINCT folder_path
             FROM files
@@ -210,6 +232,10 @@ class FileIndexer:
             ]
 
     def get_matching_file_folder_counts(self, query: str) -> dict[str, int]:
+        normalized = query.strip().lower()
+        if not normalized or not is_searchable_query(normalized):
+            return {}
+
         where_clause, params = self._file_match_clause(query)
         if not where_clause:
             return {}
@@ -227,17 +253,39 @@ class FileIndexer:
                 for row in connection.execute(sql, params)
             }
 
-    def get_files_in_folder(self, folder_path: str, query: str = "") -> list[sqlite3.Row]:
+    def get_files_in_folder(
+        self,
+        folder_path: str,
+        query: str = "",
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        normalized = query.strip().lower()
+        if normalized and not is_searchable_query(normalized):
+            return [], 0
+
         where_clause, params = self._file_match_clause(query)
-        sql = f"""
+        count_sql = f"""
+            SELECT COUNT(*) AS count
+            FROM files
+            WHERE folder_path = ?
+            {where_clause}
+        """
+        page_sql = f"""
             SELECT id, name, path, folder_path, extension, size, modified_time
             FROM files
             WHERE folder_path = ?
             {where_clause}
             ORDER BY lower(name)
+            LIMIT ? OFFSET ?
         """
         with self._connect() as connection:
-            return list(connection.execute(sql, (folder_path, *params)))
+            total_row = connection.execute(count_sql, (folder_path, *params)).fetchone()
+            rows = connection.execute(
+                page_sql,
+                (folder_path, *params, limit, offset),
+            )
+            return list(rows), int(total_row["count"])
 
     def search_results_in_folder_tree(
         self,
@@ -247,7 +295,7 @@ class FileIndexer:
         offset: int = 0,
     ) -> tuple[list[dict[str, object]], int]:
         normalized = query.strip().lower()
-        if not normalized:
+        if not normalized or not is_searchable_query(normalized):
             return [], 0
 
         folder_like_term = f"%{normalized}%"
@@ -304,30 +352,63 @@ class FileIndexer:
             total_row = connection.execute(count_sql, params).fetchone()
             rows = connection.execute(page_sql, (*params, limit, offset))
             results = [
-                    {
-                        "result_type": "File",
-                        "id": row["id"],
-                        "name": row["name"],
-                        "path": row["path"],
-                        "folder_path": row["folder_path"],
-                        "extension": row["extension"],
-                        "size": row["size"],
-                        "modified_time": row["modified_time"],
-                    }
-                    if row["result_type"] == "File"
-                    else {
-                        "result_type": "Folder",
-                        "id": row["id"],
-                        "name": row["name"],
-                        "path": row["path"],
-                        "folder_path": row["folder_path"],
-                        "extension": row["extension"],
-                        "size": row["size"],
-                        "modified_time": row["modified_time"],
-                    }
+                {
+                    "result_type": "File",
+                    "id": row["id"],
+                    "name": row["name"],
+                    "path": row["path"],
+                    "folder_path": row["folder_path"],
+                    "extension": row["extension"],
+                    "size": row["size"],
+                    "modified_time": row["modified_time"],
+                }
+                if row["result_type"] == "File"
+                else {
+                    "result_type": "Folder",
+                    "id": row["id"],
+                    "name": row["name"],
+                    "path": row["path"],
+                    "folder_path": row["folder_path"],
+                    "extension": row["extension"],
+                    "size": row["size"],
+                    "modified_time": row["modified_time"],
+                }
                 for row in rows
             ]
             return results, int(total_row["count"])
+
+    def upsert_folder(self, folder: FolderRecord) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO folders (path, name, parent_path)
+                VALUES (?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    name = excluded.name,
+                    parent_path = excluded.parent_path
+                """,
+                (folder.path, folder.name, folder.parent_path),
+            )
+
+    def delete_folder_subtree(self, folder_path: str) -> None:
+        child_prefix = f"{folder_path}{self._path_separator(folder_path)}%"
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            connection.execute(
+                """
+                DELETE FROM files
+                WHERE folder_path = ? OR folder_path LIKE ?
+                """,
+                (folder_path, child_prefix),
+            )
+            connection.execute(
+                """
+                DELETE FROM folders
+                WHERE path = ? OR path LIKE ?
+                """,
+                (folder_path, child_prefix),
+            )
+            connection.commit()
 
     def upsert_file(self, file: FileRecord) -> None:
         with self._connect() as connection:
@@ -391,8 +472,11 @@ class FileIndexer:
             connection.commit()
 
     def folder_contains_matches(self, folder_path: str, query: str) -> bool:
-        where_clause, params = self._file_match_clause(query)
         normalized = query.strip().lower()
+        if not normalized or not is_searchable_query(normalized):
+            return False
+
+        where_clause, params = self._file_match_clause(query)
         like_term = f"%{normalized}%"
         child_prefix = f"{folder_path}{self._path_separator(folder_path)}%"
         sql = f"""
