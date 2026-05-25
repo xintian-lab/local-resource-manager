@@ -50,6 +50,7 @@ from app.core.paths import database_path_for_root, database_path, settings_path
 from app.core.scanner import FileScanner, ScanCancelledError, ScanResult, normalize_path
 from app.core.search import SearchService
 from app.core.search_constants import (
+    DEFAULT_SEARCH_SUBTREE_RESULTS,
     DEFAULT_SHOW_FOLDER_MATCH_COUNTS,
     DEFAULT_WATCH_INDEX_CHANGES,
     LARGE_INDEX_FILE_COUNT,
@@ -66,6 +67,8 @@ from app.ui.settings_constants import (
     DEFAULT_KEYBOARD_FOLDER_REFRESH,
     DEFAULT_RESULTS_PAGE_SIZE,
     DEFAULT_SEARCH_MODE,
+    DEFAULT_SHOW_FILE_ICONS,
+    DEFAULT_SHOW_FOLDER_ICONS,
     DEFAULT_THEME,
     KEY_BINDING_LABELS,
     KEYBOARD_FOLDER_REFRESH_IMMEDIATE,
@@ -73,7 +76,9 @@ from app.ui.settings_constants import (
     SEARCH_MODE_DEBOUNCED,
     SEARCH_MODE_ENTER,
     THEMES,
+    normalize_custom_theme_colors,
     normalize_key_sequence,
+    resolve_theme,
 )
 from app.ui.settings_dialog import SettingsDialog
 
@@ -150,10 +155,28 @@ class MainWindow(QMainWindow):
                 DEFAULT_WATCH_INDEX_CHANGES,
             )
         )
+        self.search_subtree_results = bool(
+            self.app_settings.get(
+                "search_subtree_results",
+                self.app_settings.get(
+                    "global_search_results",
+                    DEFAULT_SEARCH_SUBTREE_RESULTS,
+                ),
+            )
+        )
         self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
             self.app_settings.get("keyboard_folder_refresh", DEFAULT_KEYBOARD_FOLDER_REFRESH)
         )
         self.theme_name = self._normalize_theme_name(self.app_settings.get("theme", DEFAULT_THEME))
+        self.custom_theme_colors = normalize_custom_theme_colors(
+            self.app_settings.get("custom_theme_colors")
+        )
+        self.show_file_icons = bool(
+            self.app_settings.get("show_file_icons", DEFAULT_SHOW_FILE_ICONS)
+        )
+        self.show_folder_icons = bool(
+            self.app_settings.get("show_folder_icons", DEFAULT_SHOW_FOLDER_ICONS)
+        )
         self.keyboard_mode_enabled = bool(self.app_settings.get("keyboard_mode_enabled", False))
         self.key_bindings = self._load_key_bindings()
         self.active_search_query = ""
@@ -183,9 +206,11 @@ class MainWindow(QMainWindow):
         self.select_root_button = QPushButton("Select Root Folder")
         self.pin_folder_button = QPushButton("Pin/Unpin Folder")
         self.pin_folder_button.setCheckable(True)
-        self.keyboard_mode_button = QPushButton()
-        self.keyboard_mode_button.setCheckable(True)
-        self.keyboard_mode_button.setChecked(self.keyboard_mode_enabled)
+        self.search_scope_button = QPushButton()
+        self.search_scope_button.setCheckable(True)
+        self.search_scope_button.setChecked(self.search_subtree_results)
+        self.search_scope_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._update_search_scope_button()
         self.previous_results_button = QPushButton("Previous")
         self.next_results_button = QPushButton("Next")
         self.results_page_label = QLabel("")
@@ -211,6 +236,8 @@ class MainWindow(QMainWindow):
         self.bookmark_tab_bar = BookmarkTabBar()
         self.column_view = ColumnView(self._load_child_folders)
         self.file_table = FileTable()
+        self.column_view.set_show_folder_icons(self.show_folder_icons)
+        self.file_table.set_show_file_icons(self.show_file_icons)
         self._apply_shortcut_labels()
         self.status = QStatusBar()
 
@@ -234,7 +261,7 @@ class MainWindow(QMainWindow):
         for button in (
             self.select_root_button,
             self.pin_folder_button,
-            self.keyboard_mode_button,
+            self.search_scope_button,
             self.previous_results_button,
             self.next_results_button,
             self.save_tab_button,
@@ -246,7 +273,7 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout()
         toolbar.addWidget(self.select_root_button)
         toolbar.addWidget(self.pin_folder_button)
-        toolbar.addWidget(self.keyboard_mode_button)
+        toolbar.addWidget(self.search_scope_button)
         toolbar.addWidget(self.search_box_container, stretch=1)
         toolbar.addWidget(self.previous_results_button)
         toolbar.addWidget(self.next_results_button)
@@ -279,7 +306,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.select_root_button.clicked.connect(self.select_root_folder)
         self.pin_folder_button.clicked.connect(self._on_pin_folder_button_clicked)
-        self.keyboard_mode_button.toggled.connect(self._set_keyboard_mode_enabled)
+        self.search_scope_button.toggled.connect(self._set_search_subtree_results)
         self.previous_results_button.clicked.connect(self._show_previous_results_page)
         self.next_results_button.clicked.connect(self._show_next_results_page)
         self.scan_play_button.clicked.connect(self._start_root_scan)
@@ -298,6 +325,7 @@ class MainWindow(QMainWindow):
         self.bookmark_tab_bar.new_tab_requested.connect(self._create_tab_from_current_location)
         self.bookmark_tab_bar.tabs_reordered.connect(self._on_tabs_reordered)
         self.bookmark_tab_bar.rename_requested.connect(self._rename_tab)
+        self.bookmark_tab_bar.update_tab_requested.connect(self._update_tab_from_current_state)
         self.column_view.folder_selected.connect(self._handle_folder_selected)
         self.column_view.bookmark_requested.connect(self._save_folder_to_tabs)
         self.column_view.copy_path_requested.connect(self._copy_path_to_clipboard)
@@ -512,13 +540,27 @@ class MainWindow(QMainWindow):
     @Slot(bool)
     def _set_keyboard_mode_enabled(self, enabled: bool) -> None:
         self.keyboard_mode_enabled = enabled
-        self._update_keyboard_mode_button()
         self._save_settings()
         if enabled:
             self.column_view.ensure_keyboard_selection()
-            self.status.showMessage("Keyboard Mode enabled. Use W/S to select folders, A/D to change levels.")
+            self.status.showMessage("Keyboard mode enabled. Use W/S to select folders, A/D to change levels.")
         else:
-            self.status.showMessage("Keyboard Mode disabled. WASD scrolling restored.")
+            self.status.showMessage("Mouse mode enabled. WASD shortcuts scroll the view.")
+
+    @Slot(bool)
+    def _set_search_subtree_results(self, enabled: bool) -> None:
+        self.search_subtree_results = enabled
+        self._update_search_scope_button()
+        self._save_settings()
+        if not self.root_path:
+            return
+        self.search_result_offset = 0
+        self._refresh_files()
+        self._update_search_status_label()
+        if enabled:
+            self.status.showMessage("Search scope: current folder and subfolders.")
+        else:
+            self.status.showMessage("Search scope: current folder only.")
 
     def _scroll_hovered_area_vertically(self, direction: int) -> None:
         scroll_area = self._hovered_scroll_area()
@@ -693,7 +735,13 @@ class MainWindow(QMainWindow):
         if self.keyboard_mode_enabled:
             self.search_input.clearFocus()
 
-    def _apply_search(self, query: str, show_status: bool = True) -> None:
+    def _apply_search(
+        self,
+        query: str,
+        show_status: bool = True,
+        *,
+        anchor_folder: str | None = None,
+    ) -> None:
         if not self.root_path:
             return
 
@@ -708,7 +756,15 @@ class MainWindow(QMainWindow):
         self.search_timer.stop()
         self.active_search_query = query
         self.search_result_offset = 0
-        self.column_view.set_search_query(self.active_search_query)
+
+        reset_to_root = bool(stripped) and anchor_folder is None
+        if stripped:
+            self.selected_folder = normalize_path(anchor_folder) if anchor_folder else self.root_path
+        self.column_view.set_search_query(
+            self.active_search_query,
+            reset_to_root=reset_to_root,
+        )
+
         started = time.perf_counter()
         self._refresh_files()
         if self.active_search_query.strip():
@@ -732,14 +788,24 @@ class MainWindow(QMainWindow):
             return
 
         if self.active_search_query.strip():
-            results, total = self.search_service.results_in_folder_tree(
-                self.selected_folder,
-                self.active_search_query,
-                self.results_page_size,
-                self.search_result_offset,
-            )
-            self.search_result_total = total
-            self.file_table.set_results(results)
+            if self.search_subtree_results:
+                results, total = self.search_service.results_in_folder_tree(
+                    self.selected_folder,
+                    self.active_search_query,
+                    self.results_page_size,
+                    self.search_result_offset,
+                )
+                self.search_result_total = total
+                self.file_table.set_results(results)
+            else:
+                files, total = self.search_service.files_in_folder(
+                    self.selected_folder,
+                    self.active_search_query,
+                    limit=self.results_page_size,
+                    offset=self.search_result_offset,
+                )
+                self.search_result_total = total
+                self.file_table.set_files(files)
         else:
             files, total = self.search_service.files_in_folder(
                 self.selected_folder,
@@ -973,7 +1039,11 @@ class MainWindow(QMainWindow):
         self.search_input.blockSignals(True)
         self.search_input.setText(tab.search_query)
         self.search_input.blockSignals(False)
-        self._apply_search(tab.search_query, show_status=False)
+        self._apply_search(
+            tab.search_query,
+            show_status=False,
+            anchor_folder=folder_path if tab.search_query.strip() else None,
+        )
 
         if self.keyboard_mode_enabled:
             self.column_view.ensure_keyboard_selection()
@@ -1092,6 +1162,25 @@ class MainWindow(QMainWindow):
         self._save_bookmarks()
 
     @Slot(int)
+    def _update_tab_from_current_state(self, visible_index: int) -> None:
+        tab = self._visible_tab_at(visible_index)
+        if tab is None or tab.id != self.active_tab_id:
+            return
+        if not self.root_path:
+            self.status.showMessage("Select a root folder before updating a tab.")
+            return
+
+        tab.root_path = normalize_path(self.root_path)
+        tab.folder_path = normalize_path(self.selected_folder or self.root_path)
+        tab.search_query = self.active_search_query.strip()
+        self._sync_tab_bar()
+        self._save_bookmarks()
+        detail = tab.folder_path
+        if tab.search_query:
+            detail += f" · search: {tab.search_query}"
+        self.status.showMessage(f"Updated tab: {tab.display_label()} ({detail})")
+
+    @Slot(int)
     def _close_tab(self, visible_index: int) -> None:
         tab = self._visible_tab_at(visible_index)
         if tab is None:
@@ -1131,8 +1220,9 @@ class MainWindow(QMainWindow):
         if tab is None:
             return
 
+        dialog_parent = self.bookmark_tab_bar.modal_dialog_parent()
         response = QMessageBox.question(
-            self,
+            dialog_parent,
             "Delete Tab",
             f"Delete this saved tab permanently?\n\n{tab.folder_path}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1202,8 +1292,9 @@ class MainWindow(QMainWindow):
         if tab is None:
             return
 
+        dialog_parent = self.bookmark_tab_bar.modal_dialog_parent()
         response = QMessageBox.question(
-            self,
+            dialog_parent,
             "Delete Tab",
             f"Delete this saved tab permanently?\n\n{tab.folder_path}",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -1481,8 +1572,12 @@ class MainWindow(QMainWindow):
             self.results_page_size,
             self.show_folder_match_counts,
             self.watch_index_changes,
+            self.keyboard_mode_enabled,
             self.keyboard_folder_refresh,
+            self.show_file_icons,
+            self.show_folder_icons,
             self.theme_name,
+            self.custom_theme_colors,
             self.key_bindings,
             self,
         )
@@ -1505,8 +1600,13 @@ class MainWindow(QMainWindow):
             "results_page_size": self.results_page_size,
             "show_folder_match_counts": self.show_folder_match_counts,
             "watch_index_changes": self.watch_index_changes,
+            "search_subtree_results": self.search_subtree_results,
+            "keyboard_mode_enabled": self.keyboard_mode_enabled,
             "keyboard_folder_refresh": self.keyboard_folder_refresh,
             "theme_name": self.theme_name,
+            "custom_theme_colors": dict(self.custom_theme_colors),
+            "show_file_icons": self.show_file_icons,
+            "show_folder_icons": self.show_folder_icons,
             "key_bindings": dict(self.key_bindings),
         }
 
@@ -1518,10 +1618,19 @@ class MainWindow(QMainWindow):
         self.watch_index_changes = bool(
             snapshot.get("watch_index_changes", DEFAULT_WATCH_INDEX_CHANGES)
         )
+        self.search_subtree_results = bool(
+            snapshot.get("search_subtree_results", DEFAULT_SEARCH_SUBTREE_RESULTS)
+        )
+        self.keyboard_mode_enabled = bool(snapshot.get("keyboard_mode_enabled", False))
         self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
             snapshot["keyboard_folder_refresh"]
         )
         self.theme_name = self._normalize_theme_name(snapshot["theme_name"])
+        self.custom_theme_colors = normalize_custom_theme_colors(
+            snapshot.get("custom_theme_colors")
+        )
+        self.show_file_icons = bool(snapshot.get("show_file_icons", DEFAULT_SHOW_FILE_ICONS))
+        self.show_folder_icons = bool(snapshot.get("show_folder_icons", DEFAULT_SHOW_FOLDER_ICONS))
         self.key_bindings = self._normalize_key_bindings(snapshot["key_bindings"])
         self._apply_settings_effects(refresh_files=True, save_disk=False)
 
@@ -1532,6 +1641,7 @@ class MainWindow(QMainWindow):
             self.results_page_size,
             self.show_folder_match_counts,
             self.watch_index_changes,
+            self.keyboard_mode_enabled,
             self.keyboard_folder_refresh,
         ) = dialog.search_values()
         self.search_mode = self._normalize_search_mode(self.search_mode)
@@ -1540,7 +1650,9 @@ class MainWindow(QMainWindow):
         self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
             self.keyboard_folder_refresh
         )
+        self.show_file_icons, self.show_folder_icons = dialog.ui_values()
         self.theme_name = self._normalize_theme_name(dialog.theme_value())
+        self.custom_theme_colors = normalize_custom_theme_colors(dialog.custom_theme_colors())
         self.key_bindings = self._normalize_key_bindings(dialog.keyboard_values())
         self._apply_settings_effects(refresh_files=True, save_disk=True)
 
@@ -1560,12 +1672,16 @@ class MainWindow(QMainWindow):
     def _apply_settings_effects(self, *, refresh_files: bool, save_disk: bool) -> None:
         self.search_result_offset = 0
         self._update_search_placeholder()
+        self.file_table.set_show_file_icons(self.show_file_icons)
+        self.column_view.set_show_folder_icons(self.show_folder_icons)
         self._apply_theme()
         self._apply_shortcut_labels()
         if save_disk:
             self._save_settings()
         if refresh_files and self.root_path:
             self.column_view.set_search_query(self.active_search_query)
+            if self.selected_folder:
+                self.column_view.rebuild_to_path(self.selected_folder)
             self._refresh_files()
         if self.watch_index_changes and self.root_path:
             self._start_index_watcher()
@@ -1576,12 +1692,18 @@ class MainWindow(QMainWindow):
                 self.search_timer.start(self.debounce_ms)
         else:
             self.search_timer.stop()
+        if self.keyboard_mode_enabled and self.root_path:
+            self.column_view.ensure_keyboard_selection()
 
     @Slot(str)
-    def _preview_theme(self, theme_name: str) -> None:
+    @Slot(str, object)
+    def _preview_theme(self, theme_name: str, custom_colors: object = None) -> None:
         self.theme_name = self._normalize_theme_name(theme_name)
+        if custom_colors is not None:
+            self.custom_theme_colors = normalize_custom_theme_colors(custom_colors)
+        theme = resolve_theme(self.theme_name, self.custom_theme_colors)
         self._apply_theme()
-        self.status.showMessage(f"Previewing theme: {THEMES[self.theme_name]['label']}")
+        self.status.showMessage(f"Previewing theme: {theme['label']}")
 
     def _load_last_root_if_available(self) -> None:
         last_root = str(self.app_settings.get("last_root", "") or "")
@@ -1616,8 +1738,12 @@ class MainWindow(QMainWindow):
         self.app_settings["results_page_size"] = self.results_page_size
         self.app_settings["show_folder_match_counts"] = self.show_folder_match_counts
         self.app_settings["watch_index_changes"] = self.watch_index_changes
+        self.app_settings["search_subtree_results"] = self.search_subtree_results
         self.app_settings["keyboard_folder_refresh"] = self.keyboard_folder_refresh
         self.app_settings["theme"] = self.theme_name
+        self.app_settings["custom_theme_colors"] = dict(self.custom_theme_colors)
+        self.app_settings["show_file_icons"] = self.show_file_icons
+        self.app_settings["show_folder_icons"] = self.show_folder_icons
         self.app_settings["keyboard_mode_enabled"] = self.keyboard_mode_enabled
         self.app_settings["keyboard_shortcuts"] = self.key_bindings
         SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -1647,7 +1773,7 @@ class MainWindow(QMainWindow):
         self._set_button_shortcut_tooltip(self.select_root_button, "select_root")
         self.pin_folder_button.setText("Pin/Unpin Folder")
         self._set_button_shortcut_tooltip(self.pin_folder_button, "pin_folder")
-        self._update_keyboard_mode_button()
+        self._update_search_scope_button()
         self.file_table.set_shortcut_labels(self.key_bindings)
         self._update_search_placeholder()
 
@@ -1675,6 +1801,10 @@ class MainWindow(QMainWindow):
     def _update_search_status_label(self) -> None:
         if self.active_search_query.strip():
             text = f"Search applied: {self.active_search_query}"
+            if self.search_subtree_results:
+                text += " · subtree"
+            else:
+                text += " · folder only"
             if self.last_search_elapsed_ms is not None:
                 text += f" · {self.last_search_elapsed_ms:.1f} ms"
             self.search_status_label.setText(text)
@@ -1682,16 +1812,27 @@ class MainWindow(QMainWindow):
 
         self.search_status_label.setText("")
 
-    def _update_keyboard_mode_button(self) -> None:
-        state = "On" if self.keyboard_mode_enabled else "Off"
-        self.keyboard_mode_button.setText(f"Keyboard Mode: {state}")
+    def _update_search_scope_button(self) -> None:
+        self.search_scope_button.blockSignals(True)
+        self.search_scope_button.setChecked(self.search_subtree_results)
+        self.search_scope_button.blockSignals(False)
+        if self.search_subtree_results:
+            self.search_scope_button.setText("Search: Subtree")
+            self.search_scope_button.setToolTip(
+                "Searching current folder and all subfolders. Click to switch to folder-only."
+            )
+        else:
+            self.search_scope_button.setText("Search: Folder")
+            self.search_scope_button.setToolTip(
+                "Searching current folder only. Click to switch to subtree."
+            )
 
     def _normalize_theme_name(self, value: object) -> str:
         theme_name = str(value or "")
         return theme_name if theme_name in THEMES else DEFAULT_THEME
 
     def _apply_theme(self) -> None:
-        theme = THEMES[self.theme_name]
+        theme = resolve_theme(self.theme_name, self.custom_theme_colors)
         app = QApplication.instance()
         if app is None:
             return
@@ -2037,6 +2178,45 @@ class MainWindow(QMainWindow):
                 font-size: 20px;
                 font-weight: 600;
                 padding-bottom: 8px;
+            }}
+
+            QLabel#settingsPageIntro {{
+                color: {theme["text"]};
+                padding-bottom: 12px;
+            }}
+
+            QPushButton#themeColorButton {{
+                min-height: 26px;
+                padding: 4px 10px;
+                border: 1px solid {theme["border"]};
+                border-radius: 4px;
+            }}
+
+            QLabel#settingsSectionTitle {{
+                font-size: 14px;
+                font-weight: 600;
+                padding-top: 12px;
+                padding-bottom: 4px;
+            }}
+
+            QWidget#fileAreaModeRow QPushButton#fileAreaModeOption {{
+                min-width: 0;
+                min-height: 26px;
+                padding: 3px 14px;
+                border: 1px solid {theme["border"]};
+                border-radius: 4px;
+                background: {theme["background"]};
+                color: {theme["text"]};
+            }}
+
+            QWidget#fileAreaModeRow QPushButton#fileAreaModeOption:checked {{
+                background: #4f9edb;
+                color: #ffffff;
+                border: 1px solid #357abd;
+            }}
+
+            QWidget#fileAreaModeRow QPushButton#fileAreaModeOption:hover:!checked {{
+                background: {theme["alternate_surface"]};
             }}
 
             QWidget#settingsButtons {{

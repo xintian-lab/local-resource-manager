@@ -20,6 +20,20 @@ from app.core.bookmarks import BookmarkTab
 from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
 
 
+class TabOverflowPanel(QFrame):
+    """Dropdown panel that stays open while menus or dialogs are shown."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(
+            parent,
+            Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint,
+        )
+        self.setObjectName("tabOverflowPopup")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+
+
 class ClosableTabBar(QTabBar):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -107,6 +121,11 @@ class ClosableTabBar(QTabBar):
                 self.tabCloseRequested.emit(index)
                 event.accept()
                 return
+        if event.button() == Qt.MouseButton.RightButton:
+            index = self.tabAt(event.pos())
+            if index >= 0:
+                event.accept()
+                return
         super().mousePressEvent(event)
 
 
@@ -122,6 +141,7 @@ class BookmarkTabBar(QWidget):
     new_tab_requested = Signal()
     tabs_reordered = Signal(int, int)
     rename_requested = Signal(int, str)
+    update_tab_requested = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -150,9 +170,9 @@ class BookmarkTabBar(QWidget):
         self.overflow_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.overflow_button.setToolTip("All tabs and closed bookmarks")
         self.overflow_button.setVisible(False)
-        self.overflow_button.clicked.connect(self._show_overflow_popup)
+        self.overflow_button.clicked.connect(self._toggle_overflow_panel)
 
-        self._overflow_popup: QWidget | None = None
+        self._overflow_panel: TabOverflowPanel | None = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -169,10 +189,20 @@ class BookmarkTabBar(QWidget):
     def set_tabs(self, tabs: list[BookmarkTab]) -> None:
         self._tabs = list(tabs)
         self._rebuild_tab_bar()
+        self._refresh_overflow_if_visible()
 
     def set_closed_tabs(self, tabs: list[BookmarkTab]) -> None:
         self._closed_tabs = list(tabs)
         self._update_overflow_button()
+        self._refresh_overflow_if_visible()
+
+    def modal_dialog_parent(self) -> QWidget:
+        if self._overflow_panel is not None and self._overflow_panel.isVisible():
+            return self._overflow_panel
+        return self
+
+    def overflow_panel_visible(self) -> bool:
+        return self._overflow_panel is not None and self._overflow_panel.isVisible()
 
     def tabs(self) -> list[BookmarkTab]:
         return self._tabs
@@ -270,14 +300,19 @@ class BookmarkTabBar(QWidget):
         tab: BookmarkTab,
         visible_index: int | None,
         global_position,
+        menu_parent: QWidget | None = None,
     ) -> None:
-        menu = QMenu(self)
+        owner = menu_parent or self
+        menu = QMenu(owner)
         is_open = visible_index is not None and visible_index >= 0
 
         rename_action = None
+        update_action = None
         close_action = None
         if is_open:
             rename_action = menu.addAction("Rename Tab")
+            if visible_index == self.tab_bar.currentIndex():
+                update_action = menu.addAction("Update Tab")
         copy_path_action = menu.addAction(COPY_FULL_PATH_LABEL)
         if is_open:
             menu.addSeparator()
@@ -288,7 +323,9 @@ class BookmarkTabBar(QWidget):
         if chosen is None:
             return
         if chosen is rename_action and is_open:
-            self._rename_tab(visible_index)
+            self._rename_tab(visible_index, dialog_parent=owner)
+        elif chosen is update_action and is_open:
+            self.update_tab_requested.emit(visible_index)
         elif chosen is copy_path_action:
             if is_open:
                 self.copy_path_requested.emit(visible_index)
@@ -312,12 +349,12 @@ class BookmarkTabBar(QWidget):
             global_position=self.tab_bar.mapToGlobal(position),
         )
 
-    def _rename_tab(self, index: int) -> None:
+    def _rename_tab(self, index: int, *, dialog_parent: QWidget | None = None) -> None:
         if index < 0 or index >= len(self._tabs):
             return
         tab = self._tabs[index]
         text, accepted = QInputDialog.getText(
-            self,
+            dialog_parent or self,
             "Rename Tab",
             "Tab name:",
             text=tab.display_label(),
@@ -329,22 +366,8 @@ class BookmarkTabBar(QWidget):
             return
         self.rename_requested.emit(index, cleaned)
 
-    def _show_overflow_popup(self) -> None:
-        if not self._tabs and not self._closed_tabs:
-            return
-
-        if self._overflow_popup is not None:
-            self._overflow_popup.close()
-
-        popup = QFrame(self, Qt.WindowType.Popup)
-        popup.setObjectName("tabOverflowPopup")
-        popup.setFrameShape(QFrame.Shape.StyledPanel)
-
-        list_widget = QListWidget(popup)
-        list_widget.setObjectName("tabOverflowList")
-        list_widget.setMinimumWidth(240)
-        list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-
+    def _populate_overflow_list(self, list_widget: QListWidget) -> None:
+        list_widget.clear()
         current = self.tab_bar.currentIndex()
         for index, tab in enumerate(self._tabs):
             label = tab.display_label()
@@ -366,47 +389,89 @@ class BookmarkTabBar(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, ("closed", -1, tab.id))
                 list_widget.addItem(item)
 
-        layout = QVBoxLayout(popup)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.addWidget(list_widget)
+    def _overflow_anchor_position(self):
+        return self.overflow_button.mapToGlobal(self.overflow_button.rect().bottomLeft())
 
-        def handle_item_click(item: QListWidgetItem) -> None:
-            payload = item.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(payload, tuple) or len(payload) != 3:
-                return
-            state, visible_index, tab_id = payload
-            if state == "open":
-                self._activate_overflow_tab(int(visible_index))
-            else:
-                self.reopen_tab_requested.emit(str(tab_id))
-            popup.close()
+    def _ensure_overflow_panel(self) -> tuple[TabOverflowPanel, QListWidget]:
+        if self._overflow_panel is None:
+            panel = TabOverflowPanel(self)
 
-        def handle_context_menu(position) -> None:
-            item = list_widget.itemAt(position)
-            if item is None:
-                return
-            payload = item.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(payload, tuple) or len(payload) != 3:
-                return
-            state, visible_index, tab_id = payload
-            tab = self._find_tab_by_id(str(tab_id))
-            if tab is None:
-                return
-            visible = int(visible_index) if state == "open" else None
-            self._show_tab_actions_menu(
-                tab=tab,
-                visible_index=visible,
-                global_position=list_widget.mapToGlobal(position),
-            )
+            list_widget = QListWidget(panel)
+            list_widget.setObjectName("tabOverflowList")
+            list_widget.setMinimumWidth(240)
+            list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
 
-        list_widget.itemClicked.connect(handle_item_click)
-        list_widget.customContextMenuRequested.connect(handle_context_menu)
+            layout = QVBoxLayout(panel)
+            layout.setContentsMargins(4, 4, 4, 4)
+            layout.addWidget(list_widget)
 
-        popup.adjustSize()
-        anchor = self.overflow_button.mapToGlobal(self.overflow_button.rect().bottomLeft())
-        popup.move(anchor)
-        self._overflow_popup = popup
-        popup.show()
+            def handle_item_click(item: QListWidgetItem) -> None:
+                payload = item.data(Qt.ItemDataRole.UserRole)
+                if not isinstance(payload, tuple) or len(payload) != 3:
+                    return
+                state, visible_index, tab_id = payload
+                if state == "open":
+                    self._activate_overflow_tab(int(visible_index))
+                else:
+                    self.reopen_tab_requested.emit(str(tab_id))
+                panel.hide()
+
+            def handle_context_menu(position) -> None:
+                item = list_widget.itemAt(position)
+                if item is None:
+                    return
+                payload = item.data(Qt.ItemDataRole.UserRole)
+                if not isinstance(payload, tuple) or len(payload) != 3:
+                    return
+                state, visible_index, tab_id = payload
+                tab = self._find_tab_by_id(str(tab_id))
+                if tab is None:
+                    return
+                visible = int(visible_index) if state == "open" else None
+                self._show_tab_actions_menu(
+                    tab=tab,
+                    visible_index=visible,
+                    global_position=list_widget.mapToGlobal(position),
+                    menu_parent=panel,
+                )
+
+            list_widget.itemClicked.connect(handle_item_click)
+            list_widget.customContextMenuRequested.connect(handle_context_menu)
+
+            self._overflow_panel = panel
+
+        panel = self._overflow_panel
+        assert panel is not None
+        list_widget = panel.findChild(QListWidget, "tabOverflowList")
+        assert list_widget is not None
+        return panel, list_widget
+
+    def _refresh_overflow_panel(self) -> None:
+        panel, list_widget = self._ensure_overflow_panel()
+        self._populate_overflow_list(list_widget)
+        panel.adjustSize()
+
+    def _refresh_overflow_if_visible(self) -> None:
+        if self._overflow_panel is None or not self._overflow_panel.isVisible():
+            return
+        if not self._tabs and not self._closed_tabs:
+            self._overflow_panel.hide()
+            return
+        self._refresh_overflow_panel()
+
+    def _toggle_overflow_panel(self) -> None:
+        if not self._tabs and not self._closed_tabs:
+            return
+
+        panel, list_widget = self._ensure_overflow_panel()
+        if panel.isVisible():
+            panel.hide()
+            return
+
+        self._populate_overflow_list(list_widget)
+        panel.adjustSize()
+        panel.move(self._overflow_anchor_position())
+        panel.show()
 
     def _find_tab_by_id(self, tab_id: str) -> BookmarkTab | None:
         for tab in self._tabs:
@@ -421,17 +486,25 @@ class BookmarkTabBar(QWidget):
         self.set_current_index(index)
         self.current_changed.emit(index)
 
+    def _hide_overflow_panel(self) -> None:
+        if self._overflow_panel is not None:
+            self._overflow_panel.hide()
+
     def _update_overflow_button(self) -> None:
+        should_show = self._overflow_button_should_show()
+        self.overflow_button.setVisible(should_show)
+        if not should_show:
+            self._hide_overflow_panel()
+
+    def _overflow_button_should_show(self) -> bool:
         if not self._tabs and not self._closed_tabs:
-            self.overflow_button.setVisible(False)
-            return
+            return False
 
         if self._closed_tabs:
-            self.overflow_button.setVisible(True)
-            return
+            return True
 
         total_width = 0
         for index in range(self.tab_bar.count()):
             total_width += self.tab_bar.tabRect(index).width()
         available = max(0, self.tab_bar.width() - 8)
-        self.overflow_button.setVisible(total_width > available)
+        return total_width > available

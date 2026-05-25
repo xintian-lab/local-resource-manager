@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt, Signal, QSize
 from PySide6.QtGui import QColor, QBrush
 from PySide6.QtWidgets import (
     QFrame,
@@ -24,6 +25,7 @@ from app.ui.layout_constants import (
     PANEL_HEADER_ID,
 )
 from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
+from app.ui.file_type_icons import FileTypeIconProvider
 
 FolderLoader = Callable[[str, str], Sequence[object]]
 
@@ -42,6 +44,7 @@ class ColumnView(QWidget):
         self.search_query = ""
         self.columns: list[QListWidget] = []
         self.active_column_index = 0
+        self.show_folder_icons = True
         self.scroll_animation: QPropertyAnimation | None = None
 
         self.setObjectName(CONTENT_PANEL_ID)
@@ -70,20 +73,34 @@ class ColumnView(QWidget):
         layout.addWidget(self.header_label)
         layout.addWidget(self.scroll_area, stretch=1)
 
+    def set_show_folder_icons(self, enabled: bool) -> None:
+        self.show_folder_icons = enabled
+
     def set_root(self, root_path: str, *, emit_selection: bool = True) -> None:
         self.root_path = root_path
         self.current_path = root_path
         self.active_column_index = 0
         self._clear_columns()
-        self._add_column(root_path, force=True)
+        self._add_column(root_path, selected_path=root_path, force=True)
         self._scroll_to_start()
         if emit_selection:
             self.folder_selected.emit(root_path)
 
-    def set_search_query(self, query: str) -> None:
+    def set_search_query(self, query: str, *, reset_to_root: bool = False) -> None:
         self.search_query = query
-        if self.root_path:
+        if not self.root_path:
+            return
+        if query.strip() and reset_to_root:
+            self._show_root_only()
+        else:
             self.rebuild_to_path(self.current_path)
+
+    def _show_root_only(self) -> None:
+        self._clear_columns()
+        self.active_column_index = 0
+        self._add_column(self.root_path, selected_path=self.root_path, force=True)
+        self.current_path = self.root_path
+        self._scroll_to_start()
 
     def set_pinned_path(self, pinned_path: str) -> None:
         self.pinned_path = pinned_path
@@ -126,17 +143,44 @@ class ColumnView(QWidget):
         column.customContextMenuRequested.connect(self._show_folder_context_menu)
         column.itemClicked.connect(self._handle_item_clicked)
         column.setProperty("parent_path", parent_path)
+        self._configure_folder_column(column)
 
+        folder_icon = (
+            FileTypeIconProvider.shared().folder_icon() if self.show_folder_icons else None
+        )
+
+        root_item: QListWidgetItem | None = None
+        if parent_path == self.root_path:
+            root_item = QListWidgetItem(self._root_entry_label())
+            root_item.setData(Qt.ItemDataRole.UserRole, self.root_path)
+            if folder_icon is not None:
+                root_item.setIcon(folder_icon)
+            column.addItem(root_item)
+
+        selected_item: QListWidgetItem | None = None
         for folder in folders:
             folder_path = self._row_value(folder, "path")
             item = QListWidgetItem(self._folder_label(folder))
             item.setData(Qt.ItemDataRole.UserRole, folder_path)
+            if folder_icon is not None:
+                item.setIcon(folder_icon)
             if self._is_strict_ancestor(folder_path, self.pinned_path):
                 item.setForeground(QBrush(QColor("#888888")))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
             column.addItem(item)
             if selected_path and folder_path == selected_path:
-                column.setCurrentItem(item)
+                selected_item = item
+
+        if parent_path == self.root_path:
+            if selected_path == self.root_path or (
+                not selected_path and not selected_item
+            ):
+                selected_item = root_item
+            elif not selected_item and root_item is not None:
+                selected_item = root_item
+
+        if selected_item is not None:
+            column.setCurrentItem(selected_item)
 
         self.column_layout.insertWidget(len(self.columns), column)
         self.columns.append(column)
@@ -365,6 +409,13 @@ class ColumnView(QWidget):
         column = self.columns[column_index]
         column.setCurrentItem(item)
         selected_path = str(item.data(Qt.ItemDataRole.UserRole))
+        if selected_path == self.root_path:
+            self._remove_columns_after(column_index)
+            self.current_path = selected_path
+            self.folder_selected.emit(selected_path)
+            self._scroll_to_column(column)
+            return
+
         previous_column_count = len(self.columns)
         had_next_column = previous_column_count > column_index + 1
         added_child_column = self._update_child_preview_columns(
@@ -525,6 +576,14 @@ class ColumnView(QWidget):
             return str(row[key])  # type: ignore[index]
         except (AttributeError, IndexError, KeyError, TypeError):
             return str(getattr(row, key, ""))
+
+    def _configure_folder_column(self, column: QListWidget) -> None:
+        column.setIconSize(QSize(16, 16))
+        column.setSpacing(2)
+
+    def _root_entry_label(self) -> str:
+        name = Path(self.root_path).name or self.root_path
+        return f"[Root] {name}"
 
     def _folder_label(self, folder: object) -> str:
         name = self._row_value(folder, "name")

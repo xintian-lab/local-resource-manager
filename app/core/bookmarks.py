@@ -33,6 +33,7 @@ class BookmarkTab:
         if self.search_query.strip():
             text += f"\nSearch: {self.search_query.strip()}"
         text += "\n\n× closes tab (bookmark is kept)"
+        text += "\nRight-click → Update Tab to save current folder and search"
         text += "\nRight-click → Delete Tab to remove permanently"
         return text
 

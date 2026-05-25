@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 
 from app.ui.layout_constants import CONTENT_PANEL_ID, PANEL_HEADER_HEIGHT
 from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
+from app.ui.file_type_icons import FileTypeIconProvider
 
 from app.core.file_ops import open_containing_folder, open_file, open_file_with
 
@@ -38,6 +39,7 @@ class FileTable(QTableWidget):
         super().__init__(parent)
         self.scroll_animation: QPropertyAnimation | None = None
         self.shortcut_labels: dict[str, str] = {}
+        self.show_file_icons = True
         self.setObjectName(CONTENT_PANEL_ID)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCornerButtonEnabled(False)
@@ -49,6 +51,8 @@ class FileTable(QTableWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setSortingEnabled(True)
         self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(24)
+        self.setIconSize(QSize(16, 16))
         header = self.horizontalHeader()
         header.setFixedHeight(PANEL_HEADER_HEIGHT)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -61,6 +65,9 @@ class FileTable(QTableWidget):
 
         self.itemDoubleClicked.connect(self._open_selected_file)
         self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def set_show_file_icons(self, enabled: bool) -> None:
+        self.show_file_icons = enabled
 
     def set_files(self, files: Sequence[object]) -> None:
         self.set_results(
@@ -81,15 +88,18 @@ class FileTable(QTableWidget):
     def set_results(self, results: Sequence[object]) -> None:
         self.setSortingEnabled(False)
         self.setRowCount(len(results))
+        icon_provider = FileTypeIconProvider.shared() if self.show_file_icons else None
 
         for row_index, result_row in enumerate(results):
             path = self._row_value(result_row, "path")
             result_type = self._row_value(result_row, "result_type") or "File"
             size = self._row_value(result_row, "size")
             modified_time = self._row_value(result_row, "modified_time")
+            file_name = self._row_value(result_row, "name")
+            file_extension = self._row_value(result_row, "extension")
             values = [
-                self._row_value(result_row, "name"),
-                self._row_value(result_row, "extension"),
+                file_name,
+                file_extension,
                 self._format_size(int(size)) if size else "",
                 self._format_modified(float(modified_time)) if modified_time else "",
                 self._row_value(result_row, "folder_path"),
@@ -99,6 +109,10 @@ class FileTable(QTableWidget):
                 item = QTableWidgetItem(value)
                 item.setData(Qt.ItemDataRole.UserRole, path)
                 item.setData(Qt.ItemDataRole.UserRole + 1, result_type)
+                if column_index == 0 and result_type == "File" and icon_provider is not None:
+                    item.setIcon(
+                        icon_provider.icon_for_file(name=file_name, extension=file_extension)
+                    )
                 if column_index == 2 and size:
                     item.setData(Qt.ItemDataRole.UserRole + 2, int(size))
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)

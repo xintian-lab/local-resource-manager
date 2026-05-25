@@ -11,6 +11,33 @@ KEYBOARD_FOLDER_REFRESH_IMMEDIATE = "immediate"
 KEYBOARD_FOLDER_REFRESH_ON_ENTER = "on_enter"
 DEFAULT_KEYBOARD_FOLDER_REFRESH = KEYBOARD_FOLDER_REFRESH_IMMEDIATE
 DEFAULT_THEME = "classic_dark"
+THEME_CUSTOM = "custom"
+DEFAULT_SHOW_FILE_ICONS = True
+DEFAULT_SHOW_FOLDER_ICONS = True
+
+DEFAULT_CUSTOM_THEME_COLORS = {
+    "background": "#1e1e1e",
+    "surface": "#252526",
+    "alternate_surface": "#2d3033",
+    "text": "#cccccc",
+    "border": "#3c3c3c",
+}
+
+THEME_COLOR_KEYS = (
+    "background",
+    "surface",
+    "alternate_surface",
+    "text",
+    "border",
+)
+
+THEME_COLOR_LABELS = {
+    "background": "Background",
+    "surface": "Surface",
+    "alternate_surface": "Alternate surface",
+    "text": "Text",
+    "border": "Border",
+}
 
 THEMES = {
     "classic_dark": {
@@ -77,6 +104,10 @@ THEMES = {
         "text": "#f9fafb",
         "border": "#4b5563",
     },
+    THEME_CUSTOM: {
+        "label": "Custom",
+        **DEFAULT_CUSTOM_THEME_COLORS,
+    },
 }
 
 DEFAULT_KEY_BINDINGS = {
@@ -118,3 +149,23 @@ def normalize_key_sequence(value: object) -> str:
     if normalized == "Backspace":
         return ""
     return normalized
+
+
+def normalize_custom_theme_colors(value: object) -> dict[str, str]:
+    colors = dict(DEFAULT_CUSTOM_THEME_COLORS)
+    if not isinstance(value, dict):
+        return colors
+    for key in THEME_COLOR_KEYS:
+        raw = value.get(key)
+        if isinstance(raw, str) and raw.strip():
+            colors[key] = raw.strip()
+    return colors
+
+
+def resolve_theme(theme_name: str, custom_colors: dict[str, str] | None = None) -> dict[str, str]:
+    if theme_name not in THEMES:
+        theme_name = DEFAULT_THEME
+    if theme_name == THEME_CUSTOM:
+        merged = normalize_custom_theme_colors(custom_colors or {})
+        return {**THEMES[THEME_CUSTOM], **merged}
+    return THEMES[theme_name]
