@@ -8,11 +8,13 @@ from PySide6.QtWidgets import QApplication
 from app.ui.app_icon import apply_app_icon
 from app.ui.file_type_icons import FileTypeIconProvider
 from app.ui.main_window import MainWindow
+from app.version import __version__
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("Local Resource Manager")
+    app.setApplicationVersion(__version__)
     QTimer.singleShot(0, FileTypeIconProvider.shared().preload_common)
 
     window = MainWindow()

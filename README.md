@@ -1,34 +1,77 @@
 # Local Resource Manager
 
-A desktop **file explorer and lightweight indexer**: pick a root folder, scan it into an in-memory index, browse with a multi-column outline, filter by folder tree, search by filename or extension, and inspect files in a table with themes and configurable shortcuts.
+A desktop file explorer for **ultrafast** local search and multi-column folder navigation. Scan a folder, search by name or extension, and jump back to saved locations with bookmark tabs — all on your machine, no account required.
 
-**Repository:** [github.com/xintian-lab/local-resource-manager](https://github.com/xintian-lab/local-resource-manager)
+Built with Python and PySide6. Early public release; source builds are available now; Windows `.exe` releases are planned.
+
+## Highlights
+
+- **Ultrafast local search** — SQLite-backed index; search by file name or extension
+- **Multi-column navigation** — move through nested folders column by column; folders left, files right
+- **Keyboard mode** — W/A/S/D for fast folder and file-list navigation
+- **Pin folder / scoped search** — lock browsing and search to a chosen subtree; toggle current-folder vs subtree search
+- **Bookmark tabs** — save folder + search queries; update, close, and reopen from the tab bar
+
+## Screenshots
+
+![Local Resource Manager screenshot](docs/screenshots/main-window.png)
+
+## Core features
+
+### Fast local search
+
+Scan a root folder into a local SQLite index. Results are paginated for large libraries.
+
+### Multi-column navigation
+
+Drill across folder levels without losing context. Jump back to the root or move between levels without clearing your search.
+
+### Scoped search and pin folder
+
+Search the current folder or its full subtree. **Pin** a folder to keep navigation and search inside that area without changing the root index.
+
+### Bookmarks and customization
+
+Bookmark tabs for repeat workflows. Themes, custom colors, optional icons, rebindable shortcuts, and search settings are available in Settings.
+
+## Also includes
+
+Cancellable scans · per-root databases · optional file watching and folder match counts
+
+## Privacy
+
+Everything runs locally. No files are uploaded to a server.
+
+- **Windows `.exe`:** `%LOCALAPPDATA%\Local Resource Manager\` (`data\`, `config\`)
+- **Run from source:** `app/data/` and `app/config/` next to the project
 
 ## Requirements
 
-- **Python** 3.10+ recommended
-- **Windows** — current primary dev and test target (macOS support is planned for packaged builds).
+- **Windows `.exe`:** Windows 10/11 (64-bit); no Python install required
+- **From source:** Python 3.10+
+- macOS / Linux: source only for now; packaged builds not finalized
 
-## Virtual environment (local only)
+## Windows (executable)
 
-The `.venv` folder is **only for the computer where you create it**. It contains OS-specific binaries and must **not** be shared between machines via Git, Dropbox, OneDrive, iCloud Drive, or similar sync tools. Sharing it causes broken installs, huge uploads, and overwritten environments.
+Download **`Local Resource Manager.exe`** from [Releases](https://github.com/xintian-lab/local-resource-manager/releases) (or build locally — see below). Double-click to run. Settings and indexes are stored under `%LOCALAPPDATA%\Local Resource Manager\`.
 
-**Do this on each machine:**
+Note: The Windows build may show a security warning because it is not code-signed yet.
 
-1. Open your cloud sync settings for this project folder and **exclude** `.venv` from sync (and optionally any alternate names like `venv/` if you use them).
-2. Create the environment locally (commands below), then run `pip install -r requirements.txt`.
+**Build locally (Windows):**
 
-The repo already lists `.venv/` in `.gitignore` so it never gets committed.
-
-## Quick start
-
-```bash
-cd local-resource-manager
+```powershell
+.\build_exe.ps1
 ```
 
-**Windows (PowerShell or Command Prompt):**
+Output: `dist\Local Resource Manager.exe`
+
+## Run from source
+
+**Windows:**
 
 ```bash
+git clone https://github.com/xintian-lab/local-resource-manager.git
+cd local-resource-manager
 python -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
@@ -36,52 +79,22 @@ pip install -r requirements.txt
 python main.py
 ```
 
-**macOS / Linux:**
+**macOS / Linux:** use `python3`, then `source .venv/bin/activate` instead of `.venv\Scripts\activate`.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python main.py
-```
+## Developer notes
 
-**Cursor / VS Code:** open the project folder; the Python extension should detect `.venv` automatically. Use **Python: Select Interpreter** if needed and pick `.venv` → `python`. Integrated terminals can auto-activate the venv when `python.terminal.activateEnvironment` is enabled (set in `.vscode/settings.json`).
+| Item | Source run | Windows `.exe` |
+| --- | --- | --- |
+| Settings | `app/config/settings.json` | `%LOCALAPPDATA%\Local Resource Manager\config\settings.json` |
+| Bookmark tabs | `app/config/bookmarks.json` | `%LOCALAPPDATA%\Local Resource Manager\config\bookmarks.json` |
+| Index database | `app/data/file_index*.db` | `%LOCALAPPDATA%\Local Resource Manager\data\file_index*.db` |
 
-## Dependencies
-
-See [`requirements.txt`](requirements.txt): **PySide6** drives the GUI; **PyInstaller** is included for future packaging workflows.
-
-## Data and configuration (local paths)
-
-Running from source uses paths under your project/checkout:
-
-| Purpose | Location |
-| -------- | --------- |
-| SQLite index | `app/data/file_index.db` (ignored by Git) |
-| User settings (theme, shortcuts, etc.) | `app/config/settings.json` (ignored by Git) |
-
-After cloning, files are created on first run. **Do not commit** a `settings.json` that contains private paths.
-
-## Repository layout
-
-```
-main.py           # Entry point
-app/ui/           # PySide widgets (main window, column browser, file table)
-app/core/         # Scanner, indexer, search, paths, file operations
-build_exe.ps1     # Windows-oriented build helper (evolving)
-```
+Entry: `main.py` · UI: `app/ui/` · Core: `app/core/` · Build: [`build_exe.ps1`](build_exe.ps1) · Dependencies: [`requirements.txt`](requirements.txt)
 
 ## Roadmap
 
-Planned additions (will land in-repo and ship via **`git push` / Releases**):
-
-- **Windows** — downloadable **`.exe`** (or installer) built with PyInstaller (or similar), with sensible signing and versioning TBD.
-- **macOS** — **`.app`** bundle distribution (same Qt stack via PyInstaller or platform-specific tooling), notarized/signing workflow TBD.
-- Smaller fixes: portability checks on macOS, CI to build binaries in a repeatable way once the pipelines are settled.
-
-Contribution and issue tracking welcome as the packaged releases stabilize.
+Windows installer · macOS `.app` · improved release packaging · more UI layout options
 
 ## License
 
-Not stated yet — a `LICENSE` file will be added when the redistribution terms are finalized.
+[MIT License](LICENSE) — free to use, modify, and distribute with attribution.

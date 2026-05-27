@@ -27,7 +27,6 @@ from PySide6.QtWidgets import (
 SETTINGS_NAV_ITEM_HEIGHT = 35
 SETTINGS_NAV_ITEM_SPACING = 3
 
-from app.core.search_constants import DEFAULT_WATCH_INDEX_CHANGES
 from app.ui.settings_constants import (
     DEFAULT_CUSTOM_THEME_COLORS,
     DEFAULT_DEBOUNCE_MS,
@@ -103,9 +102,13 @@ class SearchSettingsPage(QWidget):
         self.show_folder_match_counts_input.setChecked(show_folder_match_counts)
 
         self.watch_index_changes_input = QCheckBox(
-            "Watch files and update index automatically (slow on large libraries)"
+            "Watch files and update index automatically (temporarily unavailable)"
         )
-        self.watch_index_changes_input.setChecked(watch_index_changes)
+        self.watch_index_changes_input.setChecked(False)
+        self.watch_index_changes_input.setEnabled(False)
+        self.watch_index_changes_input.setToolTip(
+            "This feature is temporarily disabled while performance is improved."
+        )
 
         self.file_area_mode_group = QButtonGroup(self)
         self.file_area_mode_group.setExclusive(True)
@@ -178,7 +181,7 @@ class SearchSettingsPage(QWidget):
             int(self.debounce_input.value()),
             int(self.results_page_size_input.value()),
             self.show_folder_match_counts_input.isChecked(),
-            self.watch_index_changes_input.isChecked(),
+            False,
             self.keyboard_mode_option.isChecked(),
             str(self.keyboard_folder_refresh_input.currentData()),
         )

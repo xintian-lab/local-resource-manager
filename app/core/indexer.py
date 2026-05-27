@@ -471,6 +471,95 @@ class FileIndexer:
             )
             connection.commit()
 
+    def rename_path_prefix(self, old_path: str, new_path: str) -> None:
+        from app.core.index_tree import remap_path_prefix
+
+        old_norm = old_path
+        new_norm = new_path
+        if old_norm == new_norm:
+            return
+
+        separator = self._path_separator(old_norm)
+        child_prefix = f"{old_norm}{separator}"
+
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            folder_rows = connection.execute(
+                """
+                SELECT path, name, parent_path
+                FROM folders
+                WHERE path = ? OR path LIKE ?
+                """,
+                (old_norm, f"{child_prefix}%"),
+            ).fetchall()
+            file_rows = connection.execute(
+                """
+                SELECT name, path, folder_path, extension, size, modified_time
+                FROM files
+                WHERE path LIKE ? OR folder_path = ? OR folder_path LIKE ?
+                """,
+                (f"{child_prefix}%", old_norm, f"{child_prefix}%"),
+            ).fetchall()
+
+            connection.execute(
+                "DELETE FROM files WHERE path LIKE ? OR folder_path = ? OR folder_path LIKE ?",
+                (f"{child_prefix}%", old_norm, f"{child_prefix}%"),
+            )
+            connection.execute(
+                "DELETE FROM folders WHERE path = ? OR path LIKE ?",
+                (old_norm, f"{child_prefix}%"),
+            )
+
+            for row in folder_rows:
+                connection.execute(
+                    """
+                    INSERT INTO folders (path, name, parent_path)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        remap_path_prefix(str(row["path"]), old_norm, new_norm),
+                        row["name"],
+                        remap_path_prefix(str(row["parent_path"]), old_norm, new_norm),
+                    ),
+                )
+
+            for row in file_rows:
+                connection.execute(
+                    """
+                    INSERT INTO files (
+                        name,
+                        path,
+                        folder_path,
+                        extension,
+                        size,
+                        modified_time
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        row["name"],
+                        remap_path_prefix(str(row["path"]), old_norm, new_norm),
+                        remap_path_prefix(str(row["folder_path"]), old_norm, new_norm),
+                        row["extension"],
+                        row["size"],
+                        row["modified_time"],
+                    ),
+                )
+            connection.commit()
+
+    def get_folder_index_stats(self, folder_path: str) -> tuple[int, int]:
+        child_prefix = f"{folder_path}{self._path_separator(folder_path)}%"
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS count, COALESCE(SUM(size), 0) AS total_size
+                FROM files
+                WHERE folder_path = ? OR folder_path LIKE ?
+                """,
+                (folder_path, child_prefix),
+            ).fetchone()
+            return int(row["count"]), int(row["total_size"])
+
     def folder_contains_matches(self, folder_path: str, query: str) -> bool:
         normalized = query.strip().lower()
         if not normalized or not is_searchable_query(normalized):

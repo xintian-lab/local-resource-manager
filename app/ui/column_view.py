@@ -25,6 +25,7 @@ from app.ui.layout_constants import (
     PANEL_HEADER_ID,
 )
 from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
+from app.ui.context_menu_actions import add_clipboard_actions
 from app.ui.file_type_icons import FileTypeIconProvider
 
 FolderLoader = Callable[[str, str], Sequence[object]]
@@ -34,6 +35,14 @@ class ColumnView(QWidget):
     folder_selected = Signal(str)
     bookmark_requested = Signal(str)
     copy_path_requested = Signal(str)
+    folder_open_requested = Signal(str)
+    copy_requested = Signal(list)
+    cut_requested = Signal(list)
+    delete_requested = Signal(list)
+    paste_requested = Signal(str)
+    rename_requested = Signal(str)
+    properties_requested = Signal(str)
+    new_folder_requested = Signal(str)
 
     def __init__(self, folder_loader: FolderLoader, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -45,6 +54,7 @@ class ColumnView(QWidget):
         self.columns: list[QListWidget] = []
         self.active_column_index = 0
         self.show_folder_icons = True
+        self.shortcut_labels: dict[str, str] = {}
         self.scroll_animation: QPropertyAnimation | None = None
 
         self.setObjectName(CONTENT_PANEL_ID)
@@ -75,6 +85,13 @@ class ColumnView(QWidget):
 
     def set_show_folder_icons(self, enabled: bool) -> None:
         self.show_folder_icons = enabled
+
+    def set_shortcut_labels(self, shortcut_labels: dict[str, str]) -> None:
+        self.shortcut_labels = shortcut_labels
+
+    def _action_label(self, label: str, action_id: str) -> str:
+        shortcut = self.shortcut_labels.get(action_id, "")
+        return f"{label} ({shortcut})" if shortcut else label
 
     def set_root(self, root_path: str, *, emit_selection: bool = True) -> None:
         self.root_path = root_path
@@ -217,11 +234,56 @@ class ColumnView(QWidget):
             return
 
         folder_path = str(item.data(Qt.ItemDataRole.UserRole))
+        action_paths = [folder_path]
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+
+        open_action = menu.addAction("Open Folder")
+        menu.addSeparator()
+        (
+            copy_action,
+            cut_action,
+            delete_action,
+            new_folder_action,
+            paste_action,
+            rename_action,
+            properties_action,
+        ) = add_clipboard_actions(
+            menu,
+            action_paths=action_paths,
+            target_folder=folder_path,
+            shortcut_labels=self.shortcut_labels,
+            action_label=self._action_label,
+        )
+        if folder_path == self.root_path and cut_action is not None:
+            cut_action.setEnabled(False)
+            delete_action.setEnabled(False)
+            rename_action.setEnabled(False)
+        menu.addSeparator()
         save_action = menu.addAction("Save to Tabs")
         copy_path_action = menu.addAction(COPY_FULL_PATH_LABEL)
+
         chosen = menu.exec(column.mapToGlobal(position))
-        if chosen is save_action:
+        if chosen is None:
+            return
+
+        if chosen is open_action:
+            self.folder_open_requested.emit(folder_path)
+        elif chosen is copy_action:
+            self.copy_requested.emit(action_paths)
+        elif chosen is cut_action:
+            self.cut_requested.emit(action_paths)
+        elif chosen is delete_action:
+            self.delete_requested.emit(action_paths)
+        elif chosen is rename_action:
+            self.rename_requested.emit(folder_path)
+        elif chosen is properties_action:
+            self.properties_requested.emit(folder_path)
+        elif chosen is new_folder_action:
+            self.new_folder_requested.emit(folder_path)
+        elif chosen is paste_action:
+            self.paste_requested.emit(folder_path)
+        elif chosen is save_action:
             self.bookmark_requested.emit(folder_path)
         elif chosen is copy_path_action:
             self.copy_path_requested.emit(folder_path)

@@ -19,6 +19,11 @@ from PySide6.QtWidgets import (
 
 from app.ui.layout_constants import CONTENT_PANEL_ID, PANEL_HEADER_HEIGHT
 from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
+from app.ui.context_menu_actions import (
+    add_clipboard_actions,
+    collect_action_paths,
+    resolve_target_folder,
+)
 from app.ui.file_type_icons import FileTypeIconProvider
 
 from app.core.file_ops import open_containing_folder, open_file, open_file_with
@@ -30,8 +35,11 @@ class FileTable(QTableWidget):
     cut_requested = Signal(list)
     delete_requested = Signal(list)
     folder_open_requested = Signal(str)
-    paste_requested = Signal()
+    paste_requested = Signal(str)
     copy_path_requested = Signal(str)
+    rename_requested = Signal(str, str)
+    properties_requested = Signal(str, str)
+    new_folder_requested = Signal(str)
 
     headers = ["Name", "Extension", "Size", "Modified", "Folder"]
 
@@ -40,6 +48,7 @@ class FileTable(QTableWidget):
         self.scroll_animation: QPropertyAnimation | None = None
         self.shortcut_labels: dict[str, str] = {}
         self.show_file_icons = True
+        self.default_target_folder = ""
         self.setObjectName(CONTENT_PANEL_ID)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setCornerButtonEnabled(False)
@@ -65,6 +74,9 @@ class FileTable(QTableWidget):
 
         self.itemDoubleClicked.connect(self._open_selected_file)
         self.customContextMenuRequested.connect(self._show_context_menu)
+
+    def set_default_target_folder(self, folder_path: str) -> None:
+        self.default_target_folder = folder_path
 
     def set_show_file_icons(self, enabled: bool) -> None:
         self.show_file_icons = enabled
@@ -141,11 +153,17 @@ class FileTable(QTableWidget):
     def _show_context_menu(self, position: QPoint) -> None:
         file_path = self._path_at_position(position)
         result_type = self._type_at_position(position)
-        selected_file_paths = self.selected_file_paths()
-        action_file_paths = (
-            selected_file_paths
-            if file_path in selected_file_paths
-            else [file_path] if file_path and result_type == "File" else []
+        selected_paths = self.selected_item_paths()
+        action_paths = collect_action_paths(file_path, result_type, selected_paths)
+        action_file_paths = [
+            path
+            for path in action_paths
+            if self._result_type_for_path(path, result_type, file_path) == "File"
+        ]
+        target_folder = resolve_target_folder(
+            file_path,
+            result_type,
+            self.default_target_folder,
         )
 
         menu = QMenu(self)
@@ -153,9 +171,6 @@ class FileTable(QTableWidget):
         open_action = None
         open_with_action = None
         open_folder_action = None
-        copy_action = None
-        cut_action = None
-        delete_action = None
         copy_path_action = None
 
         if action_file_paths:
@@ -163,47 +178,99 @@ class FileTable(QTableWidget):
             open_with_action = menu.addAction("Open With...")
             open_folder_action = menu.addAction("Open Containing Folder")
             menu.addSeparator()
-            copy_action = menu.addAction(self._action_label("Copy", "copy_file"))
-            cut_action = menu.addAction(self._action_label("Cut", "cut_file"))
-            delete_action = menu.addAction(self._action_label("Delete", "delete_file"))
-            menu.addSeparator()
-            copy_path_action = menu.addAction(COPY_FULL_PATH_LABEL)
-            menu.addSeparator()
-        elif file_path and result_type == "Folder":
+        elif len(action_paths) == 1 and self._result_type_for_path(
+            action_paths[0],
+            result_type,
+            file_path,
+        ) == "Folder":
             open_action = menu.addAction("Open Folder")
             open_folder_action = menu.addAction("Open Containing Folder")
+            menu.addSeparator()
+
+        (
+            copy_action,
+            cut_action,
+            delete_action,
+            new_folder_action,
+            paste_action,
+            rename_action,
+            properties_action,
+        ) = add_clipboard_actions(
+            menu,
+            action_paths=action_paths,
+            target_folder=target_folder,
+            shortcut_labels=self.shortcut_labels,
+            action_label=self._action_label,
+        )
+
+        if action_paths:
             menu.addSeparator()
             copy_path_action = menu.addAction(COPY_FULL_PATH_LABEL)
             menu.addSeparator()
 
         add_file_action = menu.addAction("Add File...")
-        paste_action = menu.addAction(self._action_label("Paste", "paste_file"))
         selected_action = menu.exec(self.viewport().mapToGlobal(position))
         if selected_action is None:
             return
 
-        if selected_action == open_action:
-            if result_type == "Folder":
-                self.folder_open_requested.emit(file_path)
-            else:
+        if selected_action == open_action and action_paths:
+            path = action_paths[0]
+            if self._result_type_for_path(path, result_type, file_path) == "Folder":
+                self.folder_open_requested.emit(path)
+            elif action_file_paths:
                 open_file(action_file_paths[0])
-        elif selected_action == open_with_action:
+        elif selected_action == open_with_action and action_file_paths:
             self._open_file_with(action_file_paths[0])
-        elif selected_action == open_folder_action:
-            target_path = action_file_paths[0] if action_file_paths else file_path
-            open_containing_folder(target_path)
+        elif selected_action == open_folder_action and action_paths:
+            open_containing_folder(action_paths[0])
         elif selected_action == copy_action:
-            self.copy_requested.emit(action_file_paths)
+            self.copy_requested.emit(action_paths)
         elif selected_action == cut_action:
-            self.cut_requested.emit(action_file_paths)
+            self.cut_requested.emit(action_paths)
         elif selected_action == delete_action:
-            self.delete_requested.emit(action_file_paths)
-        elif selected_action == copy_path_action and file_path:
-            self.copy_path_requested.emit(file_path)
+            self.delete_requested.emit(action_paths)
+        elif selected_action == rename_action and len(action_paths) == 1:
+            path = action_paths[0]
+            self.rename_requested.emit(
+                path,
+                self._result_type_for_path(path, result_type, file_path),
+            )
+        elif selected_action == properties_action and len(action_paths) == 1:
+            path = action_paths[0]
+            self.properties_requested.emit(
+                path,
+                self._result_type_for_path(path, result_type, file_path),
+            )
+        elif selected_action == new_folder_action:
+            self.new_folder_requested.emit(target_folder)
+        elif selected_action == copy_path_action and action_paths:
+            self.copy_path_requested.emit(action_paths[0])
         elif selected_action == add_file_action:
             self.add_file_requested.emit()
         elif selected_action == paste_action:
-            self.paste_requested.emit()
+            self.paste_requested.emit(target_folder)
+
+    def _result_type_for_path(
+        self,
+        path: str,
+        context_type: str,
+        context_path: str,
+    ) -> str:
+        if path == context_path and context_type:
+            return context_type
+        row_type = self._type_for_path(path)
+        if row_type:
+            return row_type
+        return "Folder" if Path(path).is_dir() else "File"
+
+    def _type_for_path(self, path: str) -> str:
+        for row in range(self.rowCount()):
+            item = self.item(row, 0)
+            if item is None:
+                continue
+            if str(item.data(Qt.ItemDataRole.UserRole)) == path:
+                return str(item.data(Qt.ItemDataRole.UserRole + 1))
+        return ""
 
     def _open_file_with(self, file_path: str) -> None:
         try:
@@ -279,6 +346,20 @@ class FileTable(QTableWidget):
 
     def selected_result_type(self) -> str:
         return self._selected_type()
+
+    def selected_item_paths(self) -> list[str]:
+        paths: list[str] = []
+        seen: set[str] = set()
+        selected_rows = {item.row() for item in self.selectedItems()}
+        for row in sorted(selected_rows):
+            item = self.item(row, 0)
+            if item is None:
+                continue
+            path = str(item.data(Qt.ItemDataRole.UserRole))
+            if path and path not in seen:
+                paths.append(path)
+                seen.add(path)
+        return paths
 
     def selected_file_paths(self) -> list[str]:
         paths: list[str] = []

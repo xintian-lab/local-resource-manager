@@ -7,7 +7,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from app.core.scanner import FileRecord
+from app.core.scanner import FileRecord, normalize_path
 
 
 def open_file(path: str | Path) -> None:
@@ -114,6 +114,140 @@ def move_file_to_folder(source_path: str | Path, destination_folder: str | Path)
 
 def delete_file(path: str | Path) -> None:
     Path(path).resolve().unlink()
+
+
+def validate_entry_name(name: str) -> None:
+    cleaned = name.strip()
+    if not cleaned or cleaned in {".", ".."}:
+        raise OSError("Name cannot be empty.")
+    if any(character in cleaned for character in '\\/:*?"<>|'):
+        raise OSError('Name cannot contain any of \\ / : * ? " < > |')
+
+
+def rename_entry(path: str | Path, new_name: str) -> Path:
+    validate_entry_name(new_name)
+    source = Path(path).resolve()
+    destination = source.with_name(new_name.strip())
+    if destination.exists():
+        raise OSError(f'"{destination.name}" already exists.')
+    source.rename(destination)
+    return destination
+
+
+def unique_folder_destination(destination: Path) -> Path:
+    if not destination.exists():
+        return destination
+
+    parent = destination.parent
+    base_name = destination.name or "New folder"
+    candidate = parent / f"{base_name} copy"
+    counter = 2
+    while candidate.exists():
+        candidate = parent / f"{base_name} copy {counter}"
+        counter += 1
+    return candidate
+
+
+def create_folder(parent_folder: str | Path, name: str = "New folder") -> Path:
+    parent = Path(parent_folder).resolve()
+    if not parent.is_dir():
+        raise OSError("Parent folder does not exist.")
+    validate_entry_name(name)
+    destination = unique_folder_destination(parent / name.strip())
+    destination.mkdir(parents=False, exist_ok=False)
+    return destination
+
+
+def copy_entry_to_folder(source_path: str | Path, destination_folder: str | Path) -> Path:
+    source = Path(source_path).resolve()
+    destination_parent = Path(destination_folder).resolve()
+    if not destination_parent.is_dir():
+        raise OSError("Destination folder does not exist.")
+    if source.is_dir():
+        destination = unique_folder_destination(destination_parent / source.name)
+        shutil.copytree(source, destination)
+        return destination
+    return Path(copy_file_to_folder(source, destination_parent).path)
+
+
+def move_entry_to_folder(source_path: str | Path, destination_folder: str | Path) -> Path:
+    source = Path(source_path).resolve()
+    destination_parent = Path(destination_folder).resolve()
+    if not destination_parent.is_dir():
+        raise OSError("Destination folder does not exist.")
+    if source.is_dir():
+        destination = unique_folder_destination(destination_parent / source.name)
+        shutil.move(str(source), str(destination))
+        return destination
+    return Path(move_file_to_folder(source, destination_parent).path)
+
+
+def is_path_descendant(path: str | Path, ancestor: str | Path) -> bool:
+    normalized_path = normalize_path(str(Path(path).resolve()))
+    normalized_ancestor = normalize_path(str(Path(ancestor).resolve()))
+    if normalized_path == normalized_ancestor:
+        return False
+    separator = "\\" if "\\" in normalized_ancestor else "/"
+    return normalized_path.startswith(f"{normalized_ancestor}{separator}")
+
+
+def _windows_send_to_recycle_bin(target: Path) -> None:
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [
+            ("hwnd", wintypes.HWND),
+            ("wFunc", wintypes.UINT),
+            ("pFrom", wintypes.LPCWSTR),
+            ("pTo", wintypes.LPCWSTR),
+            ("fFlags", wintypes.WORD),
+            ("fAnyOperationsAborted", wintypes.BOOL),
+            ("hNameMappings", wintypes.LPVOID),
+            ("lpszProgressTitle", wintypes.LPCWSTR),
+        ]
+
+    FO_DELETE = 0x0003
+    FOF_ALLOWUNDO = 0x0040
+    FOF_NOCONFIRMATION = 0x0010
+    FOF_SILENT = 0x0004
+
+    from_buffer = str(target) + "\0\0"
+    operation = SHFILEOPSTRUCTW()
+    operation.hwnd = None
+    operation.wFunc = FO_DELETE
+    operation.pFrom = from_buffer
+    operation.pTo = None
+    operation.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    if result != 0 or operation.fAnyOperationsAborted:
+        raise OSError(f"Could not move item to Recycle Bin (code {result}).")
+
+
+def send_to_recycle_bin(path: str | Path) -> None:
+    target = Path(path).resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"Path not found: {target}")
+
+    system = platform.system()
+    if system == "Windows":
+        _windows_send_to_recycle_bin(target)
+        return
+    if system == "Darwin":
+        subprocess.run(
+            ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{target}"'],
+            check=True,
+        )
+        return
+
+    try:
+        subprocess.run(["gio", "trash", str(target)], check=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        raise OSError("Recycle Bin is unavailable on this system.") from exc
+
+
+def get_path_stat(path: str | Path) -> os.stat_result:
+    return Path(path).resolve().stat()
+
 
 
 def unique_destination(destination: Path) -> Path:

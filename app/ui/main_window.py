@@ -27,11 +27,13 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QKeySequenceEdit,
@@ -43,7 +45,19 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.bookmarks import BookmarkTab, load_bookmarks, save_bookmarks
-from app.core.file_ops import copy_file_to_folder, delete_file, move_file_to_folder
+from app.core.file_ops import (
+    copy_entry_to_folder,
+    copy_file_to_folder,
+    create_folder,
+    file_record_from_path,
+    is_path_descendant,
+    move_entry_to_folder,
+    move_file_to_folder,
+    rename_entry,
+    send_to_recycle_bin,
+)
+from app.core.index_sync import ensure_folder_chain, folder_record_from_path
+from app.core.index_tree import remap_path_prefix, sync_directory_tree
 from app.core.indexer import FileIndexer
 from app.core.index_watcher import IndexWatcher
 from app.core.paths import database_path_for_root, database_path, settings_path
@@ -52,7 +66,6 @@ from app.core.search import SearchService
 from app.core.search_constants import (
     DEFAULT_SEARCH_SUBTREE_RESULTS,
     DEFAULT_SHOW_FOLDER_MATCH_COUNTS,
-    DEFAULT_WATCH_INDEX_CHANGES,
     LARGE_INDEX_FILE_COUNT,
     MIN_SEARCH_QUERY_LENGTH,
 )
@@ -60,11 +73,14 @@ from app.ui.bookmark_tab_bar import BookmarkTabBar
 from app.ui.clipboard_paths import COPY_FULL_PATH_LABEL
 from app.ui.column_view import ColumnView
 from app.ui.file_table import FileTable
+from app.ui.help_dialogs import AboutDialog, open_author_email, open_external_url
+from app.ui.properties_dialog import PropertiesDialog
 from app.ui.scan_control_buttons import ScanPlayButton, ScanStopButton
 from app.ui.settings_constants import (
     DEFAULT_DEBOUNCE_MS,
     DEFAULT_KEY_BINDINGS,
     DEFAULT_KEYBOARD_FOLDER_REFRESH,
+    DEFAULT_KEYBOARD_MODE_ENABLED,
     DEFAULT_RESULTS_PAGE_SIZE,
     DEFAULT_SEARCH_MODE,
     DEFAULT_SHOW_FILE_ICONS,
@@ -81,6 +97,7 @@ from app.ui.settings_constants import (
     resolve_theme,
 )
 from app.ui.settings_dialog import SettingsDialog
+from app.version import AUTHOR_EMAIL, GITHUB_ISSUES_URL, GITHUB_REPO_URL
 
 
 SETTINGS_PATH = settings_path()
@@ -149,12 +166,7 @@ class MainWindow(QMainWindow):
                 DEFAULT_SHOW_FOLDER_MATCH_COUNTS,
             )
         )
-        self.watch_index_changes = bool(
-            self.app_settings.get(
-                "watch_index_changes",
-                DEFAULT_WATCH_INDEX_CHANGES,
-            )
-        )
+        self.watch_index_changes = False
         self.search_subtree_results = bool(
             self.app_settings.get(
                 "search_subtree_results",
@@ -177,7 +189,9 @@ class MainWindow(QMainWindow):
         self.show_folder_icons = bool(
             self.app_settings.get("show_folder_icons", DEFAULT_SHOW_FOLDER_ICONS)
         )
-        self.keyboard_mode_enabled = bool(self.app_settings.get("keyboard_mode_enabled", False))
+        self.keyboard_mode_enabled = bool(
+            self.app_settings.get("keyboard_mode_enabled", DEFAULT_KEYBOARD_MODE_ENABLED)
+        )
         self.key_bindings = self._load_key_bindings()
         self.active_search_query = ""
         self.indexer = FileIndexer()
@@ -303,6 +317,24 @@ class MainWindow(QMainWindow):
         settings_action = self.menuBar().addAction("Settings")
         settings_action.triggered.connect(self._open_settings)
 
+        help_menu = self.menuBar().addMenu("Help")
+        help_menu.setToolTipsVisible(True)
+        about_action = help_menu.addAction("About Local Resource Manager...")
+        about_action.triggered.connect(self._open_about_dialog)
+        help_menu.addSeparator()
+        github_action = help_menu.addAction("GitHub Repository")
+        github_action.triggered.connect(lambda: open_external_url(GITHUB_REPO_URL))
+        issues_action = help_menu.addAction("Report an Issue")
+        issues_action.triggered.connect(lambda: open_external_url(GITHUB_ISSUES_URL))
+        contact_action = help_menu.addAction("Contact Author...")
+        contact_action.setToolTip(AUTHOR_EMAIL)
+        contact_action.setStatusTip(AUTHOR_EMAIL)
+        contact_action.triggered.connect(open_author_email)
+
+    @Slot()
+    def _open_about_dialog(self) -> None:
+        AboutDialog(self).exec()
+
     def _connect_signals(self) -> None:
         self.select_root_button.clicked.connect(self.select_root_folder)
         self.pin_folder_button.clicked.connect(self._on_pin_folder_button_clicked)
@@ -327,15 +359,30 @@ class MainWindow(QMainWindow):
         self.bookmark_tab_bar.rename_requested.connect(self._rename_tab)
         self.bookmark_tab_bar.update_tab_requested.connect(self._update_tab_from_current_state)
         self.column_view.folder_selected.connect(self._handle_folder_selected)
+        self.column_view.folder_open_requested.connect(self._navigate_to_folder)
         self.column_view.bookmark_requested.connect(self._save_folder_to_tabs)
         self.column_view.copy_path_requested.connect(self._copy_path_to_clipboard)
+        self.column_view.copy_requested.connect(lambda paths: self._set_clipboard("copy", paths))
+        self.column_view.cut_requested.connect(lambda paths: self._set_clipboard("cut", paths))
+        self.column_view.delete_requested.connect(self._delete_selected_paths)
+        self.column_view.paste_requested.connect(self._paste_into_folder)
+        self.column_view.rename_requested.connect(
+            lambda path: self._rename_item(path, "Folder")
+        )
+        self.column_view.properties_requested.connect(
+            lambda path: self._show_item_properties(path, "Folder")
+        )
+        self.column_view.new_folder_requested.connect(self._create_new_folder)
         self.file_table.add_file_requested.connect(self._add_file_to_selected_folder)
         self.file_table.copy_requested.connect(lambda paths: self._set_clipboard("copy", paths))
         self.file_table.cut_requested.connect(lambda paths: self._set_clipboard("cut", paths))
-        self.file_table.delete_requested.connect(self._delete_selected_files)
+        self.file_table.delete_requested.connect(self._delete_selected_paths)
         self.file_table.folder_open_requested.connect(self._navigate_to_folder)
-        self.file_table.paste_requested.connect(self._paste_into_selected_folder)
+        self.file_table.paste_requested.connect(self._paste_into_folder)
         self.file_table.copy_path_requested.connect(self._copy_path_to_clipboard)
+        self.file_table.rename_requested.connect(self._rename_item)
+        self.file_table.properties_requested.connect(self._show_item_properties)
+        self.file_table.new_folder_requested.connect(self._create_new_folder)
         self.index_watcher.changes_ready.connect(self._handle_index_changes)
         self.search_timer.timeout.connect(self._apply_search_from_input)
         QApplication.instance().installEventFilter(self)
@@ -487,7 +534,7 @@ class MainWindow(QMainWindow):
             "pin_folder": self._toggle_pin_folder,
             "copy_file": self._copy_selected_file,
             "cut_file": self._cut_selected_file,
-            "paste_file": self._paste_into_selected_folder,
+            "paste_file": lambda: self._paste_into_folder(""),
             "delete_file": self._delete_selected_file_from_shortcut,
             "scroll_folders_left": self.column_view.scroll_one_column_left,
             "scroll_folders_right": self.column_view.scroll_one_column_right,
@@ -606,15 +653,15 @@ class MainWindow(QMainWindow):
         self._apply_search("")
 
     def _copy_selected_file(self) -> None:
-        paths = self.file_table.selected_file_paths()
+        paths = self.file_table.selected_item_paths()
         self._set_clipboard("copy", paths)
 
     def _cut_selected_file(self) -> None:
-        paths = self.file_table.selected_file_paths()
+        paths = self.file_table.selected_item_paths()
         self._set_clipboard("cut", paths)
 
     def _delete_selected_file_from_shortcut(self) -> None:
-        self._delete_selected_files(self.file_table.selected_file_paths())
+        self._delete_selected_paths(self.file_table.selected_item_paths())
 
     def _selected_file_path_for_shortcut(self) -> str:
         if self.file_table.selected_result_type() != "File":
@@ -685,6 +732,7 @@ class MainWindow(QMainWindow):
             self._update_active_tab_ui()
         else:
             self.selected_folder = result.root_path
+            self.file_table.set_default_target_folder(result.root_path)
             self.pinned_folder_path = ""
             self.column_view.set_root(result.root_path)
             if self.keyboard_mode_enabled:
@@ -776,6 +824,7 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _handle_folder_selected(self, folder_path: str) -> None:
         self.selected_folder = folder_path
+        self.file_table.set_default_target_folder(folder_path)
         self.search_result_offset = 0
         self._refresh_files()
         self._update_scope_controls()
@@ -910,6 +959,7 @@ class MainWindow(QMainWindow):
             return
 
         self.selected_folder = folder_path
+        self.file_table.set_default_target_folder(folder_path)
         self.search_result_offset = 0
         self.column_view.rebuild_to_path(folder_path)
         self._refresh_files()
@@ -1031,6 +1081,7 @@ class MainWindow(QMainWindow):
         self.root_label.setText(target_root)
 
         self.selected_folder = folder_path
+        self.file_table.set_default_target_folder(folder_path)
         self.search_result_offset = 0
         if normalize_path(self.column_view.root_path) != target_root:
             self.column_view.set_root(target_root, emit_selection=False)
@@ -1366,33 +1417,59 @@ class MainWindow(QMainWindow):
         self._save_bookmarks()
         self.status.showMessage(f"Saved tab: {tab.display_label()}")
 
+    def _is_protected_path(self, path: str) -> bool:
+        if not self.root_path:
+            return False
+        return normalize_path(path) == normalize_path(self.root_path)
+
+    def _replace_path_references(self, old_path: str, new_path: str) -> None:
+        old_norm = normalize_path(old_path)
+        new_norm = normalize_path(new_path)
+        if self.selected_folder:
+            self.selected_folder = remap_path_prefix(self.selected_folder, old_norm, new_norm)
+        if self.pinned_folder_path:
+            self.pinned_folder_path = remap_path_prefix(
+                self.pinned_folder_path,
+                old_norm,
+                new_norm,
+            )
+        for tab in self.tabs:
+            if tab.folder_path:
+                tab.folder_path = remap_path_prefix(tab.folder_path, old_norm, new_norm)
+
     def _set_clipboard(self, operation: str, paths: list[str]) -> None:
-        if not paths:
-            self.status.showMessage("Select one or more files first.")
+        usable_paths = [path for path in paths if path and not self._is_protected_path(path)]
+        if not usable_paths:
+            self.status.showMessage("The root folder cannot be copied or cut.")
             return
 
         self.clipboard_operation = operation
-        self.clipboard_paths = paths
+        self.clipboard_paths = usable_paths
         label = "Copied" if operation == "copy" else "Cut"
-        if len(paths) == 1:
-            self.status.showMessage(f"{label}: {Path(paths[0]).name}")
+        if len(usable_paths) == 1:
+            self.status.showMessage(f"{label}: {Path(usable_paths[0]).name}")
         else:
-            self.status.showMessage(f"{label}: {len(paths)} files")
+            self.status.showMessage(f"{label}: {len(usable_paths)} items")
 
     @Slot(list)
-    def _delete_selected_files(self, paths: list[str]) -> None:
+    def _delete_selected_paths(self, paths: list[str]) -> None:
         if not paths:
-            self.status.showMessage("Select one or more files first.")
+            self.status.showMessage("Select one or more items first.")
+            return
+
+        usable_paths = [path for path in paths if not self._is_protected_path(path)]
+        if not usable_paths:
+            self.status.showMessage("The root folder cannot be deleted.")
             return
 
         message = (
-            f"Delete {len(paths)} files permanently?"
-            if len(paths) > 1
-            else f"Delete this file permanently?\n\n{paths[0]}"
+            f"Move {len(usable_paths)} items to the Recycle Bin?"
+            if len(usable_paths) > 1
+            else f"Move this item to the Recycle Bin?\n\n{usable_paths[0]}"
         )
         response = QMessageBox.question(
             self,
-            "Delete Files" if len(paths) > 1 else "Delete File",
+            "Delete Items" if len(usable_paths) > 1 else "Delete Item",
             message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1402,16 +1479,92 @@ class MainWindow(QMainWindow):
 
         failures: list[tuple[str, str]] = []
         deleted_count = 0
-        for path in paths:
+        for path in usable_paths:
+            target = Path(path)
             try:
-                delete_file(path)
-                self.indexer.delete_file(path)
+                is_folder = target.is_dir()
+                send_to_recycle_bin(target)
+                if is_folder:
+                    self.indexer.delete_folder_subtree(str(target.resolve()))
+                else:
+                    self.indexer.delete_file(str(target.resolve()))
                 deleted_count += 1
             except OSError as exc:
                 failures.append((path, str(exc)))
 
         self._refresh_after_file_change()
-        self._show_batch_result("Delete", deleted_count, failures)
+        self._show_batch_result("Recycle Bin", deleted_count, failures)
+
+    @Slot(str, str)
+    def _rename_item(self, path: str, item_type: str) -> None:
+        if self._is_protected_path(path):
+            self.status.showMessage("The root folder cannot be renamed.")
+            return
+
+        target = Path(path)
+        current_name = target.name
+        new_name, accepted = QInputDialog.getText(
+            self,
+            "Rename",
+            "New name:",
+            text=current_name,
+        )
+        if not accepted:
+            return
+
+        cleaned_name = new_name.strip()
+        if not cleaned_name or cleaned_name == current_name:
+            return
+
+        try:
+            old_path = str(target.resolve())
+            new_path = str(rename_entry(target, cleaned_name).resolve())
+            if item_type == "Folder" or Path(old_path).is_dir():
+                self.indexer.rename_path_prefix(old_path, new_path)
+            else:
+                self.indexer.move_file_record(old_path, file_record_from_path(new_path))
+            self._replace_path_references(old_path, new_path)
+            self._refresh_after_file_change()
+            if self.selected_folder:
+                self.column_view.rebuild_to_path(self.selected_folder)
+            self.status.showMessage(f"Renamed to: {cleaned_name}")
+        except OSError as exc:
+            self._show_error("Rename Failed", str(exc))
+
+    @Slot(str, str)
+    def _show_item_properties(self, path: str, item_type: str) -> None:
+        folder_file_count = None
+        folder_total_size = None
+        if item_type == "Folder":
+            folder_file_count, folder_total_size = self.indexer.get_folder_index_stats(path)
+        PropertiesDialog(
+            path,
+            item_type,
+            folder_file_count=folder_file_count,
+            folder_total_size=folder_total_size,
+            parent=self,
+        ).exec()
+
+    @Slot(str)
+    def _create_new_folder(self, parent_folder: str) -> None:
+        destination_parent = parent_folder or self.selected_folder
+        if not destination_parent:
+            self.status.showMessage("Select a folder before creating a new folder.")
+            return
+
+        try:
+            created = create_folder(destination_parent)
+            created_path = str(created.resolve())
+            ensure_folder_chain(self.indexer, created_path, self.root_path)
+            record = folder_record_from_path(created_path, self.root_path)
+            if record is not None:
+                self.indexer.upsert_folder(record)
+            self._refresh_after_file_change()
+            if self.selected_folder:
+                self.column_view.rebuild_to_path(self.selected_folder)
+            self.status.showMessage(f"Created folder: {created.name}")
+        except OSError as exc:
+            self._show_error("New Folder Failed", str(exc))
 
     @Slot()
     def _add_file_to_selected_folder(self) -> None:
@@ -1431,9 +1584,10 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             self._show_error("Add File Failed", str(exc))
 
-    @Slot()
-    def _paste_into_selected_folder(self) -> None:
-        if not self.selected_folder:
+    @Slot(str)
+    def _paste_into_folder(self, target_folder: str = "") -> None:
+        destination_folder = target_folder or self.selected_folder
+        if not destination_folder:
             self.status.showMessage("Select a folder before pasting.")
             return
         if not self.clipboard_operation or not self.clipboard_paths:
@@ -1442,24 +1596,43 @@ class MainWindow(QMainWindow):
 
         failures: list[tuple[str, str]] = []
         completed_count = 0
+        destination = Path(destination_folder).resolve()
         for source_path in list(self.clipboard_paths):
             source = Path(source_path)
             try:
                 if not source.exists():
-                    raise FileNotFoundError("Clipboard file no longer exists.")
-                if self.clipboard_operation == "copy":
-                    file_record = copy_file_to_folder(source, self.selected_folder)
+                    raise FileNotFoundError("Clipboard item no longer exists.")
+                if self.clipboard_operation == "cut" and is_path_descendant(
+                    destination_folder,
+                    source_path,
+                ):
+                    raise OSError("Cannot move a folder into itself.")
+                if source.resolve() == destination:
+                    raise OSError("Item is already in the selected folder.")
+                if source.is_dir():
+                    if self.clipboard_operation == "copy":
+                        copied = copy_entry_to_folder(source, destination_folder)
+                        sync_directory_tree(
+                            self.indexer,
+                            str(copied.resolve()),
+                            self.root_path,
+                        )
+                    elif self.clipboard_operation == "cut":
+                        old_path = str(source.resolve())
+                        moved = move_entry_to_folder(source, destination_folder)
+                        self.indexer.rename_path_prefix(old_path, str(moved.resolve()))
+                    else:
+                        raise OSError("Unsupported clipboard operation.")
+                elif self.clipboard_operation == "copy":
+                    file_record = copy_file_to_folder(source, destination_folder)
                     self.indexer.upsert_file(file_record)
-                    completed_count += 1
                 elif self.clipboard_operation == "cut":
-                    if source.parent.resolve() == Path(self.selected_folder).resolve():
-                        raise OSError("File is already in the selected folder.")
                     old_path = str(source.resolve())
-                    file_record = move_file_to_folder(source, self.selected_folder)
+                    file_record = move_file_to_folder(source, destination_folder)
                     self.indexer.move_file_record(old_path, file_record)
-                    completed_count += 1
                 else:
                     raise OSError("Unsupported clipboard operation.")
+                completed_count += 1
             except OSError as exc:
                 failures.append((source_path, str(exc)))
 
@@ -1471,6 +1644,8 @@ class MainWindow(QMainWindow):
             self.clipboard_paths = [path for path, _message in failures]
 
         self._refresh_after_file_change()
+        if self.selected_folder:
+            self.column_view.rebuild_to_path(self.selected_folder)
         self._show_batch_result(operation, completed_count, failures)
 
     def _refresh_after_file_change(self) -> None:
@@ -1615,13 +1790,13 @@ class MainWindow(QMainWindow):
         self.debounce_ms = self._normalize_debounce_ms(snapshot["debounce_ms"])
         self.results_page_size = self._normalize_results_page_size(snapshot["results_page_size"])
         self.show_folder_match_counts = bool(snapshot["show_folder_match_counts"])
-        self.watch_index_changes = bool(
-            snapshot.get("watch_index_changes", DEFAULT_WATCH_INDEX_CHANGES)
-        )
+        self.watch_index_changes = False
         self.search_subtree_results = bool(
             snapshot.get("search_subtree_results", DEFAULT_SEARCH_SUBTREE_RESULTS)
         )
-        self.keyboard_mode_enabled = bool(snapshot.get("keyboard_mode_enabled", False))
+        self.keyboard_mode_enabled = bool(
+            snapshot.get("keyboard_mode_enabled", DEFAULT_KEYBOARD_MODE_ENABLED)
+        )
         self.keyboard_folder_refresh = self._normalize_keyboard_folder_refresh(
             snapshot["keyboard_folder_refresh"]
         )
@@ -1644,6 +1819,7 @@ class MainWindow(QMainWindow):
             self.keyboard_mode_enabled,
             self.keyboard_folder_refresh,
         ) = dialog.search_values()
+        self.watch_index_changes = False
         self.search_mode = self._normalize_search_mode(self.search_mode)
         self.debounce_ms = self._normalize_debounce_ms(self.debounce_ms)
         self.results_page_size = self._normalize_results_page_size(self.results_page_size)
@@ -1714,6 +1890,7 @@ class MainWindow(QMainWindow):
         if Path(last_root).exists() and self._switch_indexer_for_root(last_root):
             self.root_path = normalize_path(last_root)
             self.selected_folder = self.root_path
+            self.file_table.set_default_target_folder(self.root_path)
             self.column_view.set_root(self.root_path)
             self.column_view.set_pinned_path("")
             if self.keyboard_mode_enabled:
@@ -1775,6 +1952,7 @@ class MainWindow(QMainWindow):
         self._set_button_shortcut_tooltip(self.pin_folder_button, "pin_folder")
         self._update_search_scope_button()
         self.file_table.set_shortcut_labels(self.key_bindings)
+        self.column_view.set_shortcut_labels(self.key_bindings)
         self._update_search_placeholder()
 
     def _set_button_shortcut_tooltip(self, button: QPushButton, action_id: str) -> None:
