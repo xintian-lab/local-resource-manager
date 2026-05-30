@@ -2,7 +2,7 @@
 
 A desktop file explorer for **ultrafast** local search and multi-column folder navigation. Scan a folder, search by name or extension, and jump back to saved locations with bookmark tabs — all on your machine, no account required.
 
-Built with Python and PySide6. Early public release; source builds are available now; Windows `.exe` releases are planned.
+Built with Python and PySide6. Early public release; Windows `.exe` and source builds are available on [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases/latest).
 
 ## Highlights
 
@@ -73,7 +73,7 @@ Local indexes and config files are user data and should not be committed to Git.
 
 ## Windows (executable)
 
-Windows `.exe` releases are planned for [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases). Until then, build locally on Windows (see below). Settings and indexes are stored under `%LOCALAPPDATA%\Local Resource Manager\`.
+Download the latest Windows `.exe` from [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases/latest). No Python install required. Settings and indexes are stored under `%LOCALAPPDATA%\Local Resource Manager\`.
 
 Note: The Windows build may show a security warning because it is not code-signed yet.
 
