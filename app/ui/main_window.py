@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from PySide6.QtCore import (
     Signal,
     Slot,
 )
-from PySide6.QtGui import QCursor, QGuiApplication, QKeySequence
+from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
     QApplication,
@@ -314,10 +315,21 @@ class MainWindow(QMainWindow):
         self.status.showMessage("Choose a root folder to scan.")
 
     def _build_menu(self) -> None:
-        settings_action = self.menuBar().addAction("Settings")
-        settings_action.triggered.connect(self._open_settings)
+        menu_bar = self.menuBar()
 
-        help_menu = self.menuBar().addMenu("Help")
+        if sys.platform == "darwin":
+            # macOS native menu bar: top-level Settings menu beside Help.
+            settings_menu = menu_bar.addMenu("Settings")
+            settings_menu.setToolTipsVisible(True)
+            open_settings = settings_menu.addAction("Preferences...")
+            open_settings.setMenuRole(QAction.MenuRole.NoRole)
+            open_settings.setShortcut(QKeySequence.StandardKey.Preferences)
+            open_settings.triggered.connect(self._open_settings)
+        else:
+            settings_action = menu_bar.addAction("Settings")
+            settings_action.triggered.connect(self._open_settings)
+
+        help_menu = menu_bar.addMenu("Help")
         help_menu.setToolTipsVisible(True)
         about_action = help_menu.addAction("About Local Resource Manager...")
         about_action.triggered.connect(self._open_about_dialog)
