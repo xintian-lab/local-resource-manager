@@ -2,7 +2,7 @@
 
 A desktop file explorer for **ultrafast** local search and multi-column folder navigation. Scan a folder, search by name or extension, and jump back to saved locations with bookmark tabs — all on your machine, no account required.
 
-Built with Python and PySide6. Early public release; Windows `.exe` on [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases/latest). macOS: build a local `.app` (see below) or run from source.
+Built with Python and PySide6. Early public release; Windows `.exe` and macOS `.app` (zip) on [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases/latest). Or run from source (see below).
 
 ## Highlights
 
@@ -88,11 +88,18 @@ Output: `dist\Local Resource Manager.exe`
 
 ## macOS (application)
 
-There is no pre-built macOS download on Releases yet. On a Mac, build a local `.app` with PyInstaller (one-time setup below), then run it or zip it for sharing.
+Download **Local-Resource-Manager-macOS.zip** from [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases/latest). Unzip to get `Local Resource Manager.app`. No Python install required.
 
 Settings and indexes are stored under `~/Library/Application Support/Local Resource Manager/`.
 
-Note: The app is not notarized yet; macOS may block it on first open. Use **Right-click → Open**, or allow it in **System Settings → Privacy & Security**.
+**First launch:** The app is not notarized yet. macOS may block it and show *Move to Trash* or an unidentified-developer warning. To open anyway:
+
+1. **Right-click** the app → **Open**, then confirm in the dialog, or
+2. Double-click once (blocked), then go to **System Settings → Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to *Local Resource Manager*.
+
+After the first successful launch, you can double-click normally.
+
+**Architecture:** Current Release builds are **Apple Silicon (arm64)**. Intel Macs need a local build (below).
 
 **Build locally (macOS):**
 
@@ -119,6 +126,12 @@ ditto -c -k --keepParent "dist/Local Resource Manager.app" "dist/Local-Resource-
 ```
 
 Upload the `.zip` to [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases) alongside the Windows `.exe`. Build on the Mac you intend to support (Apple Silicon vs Intel builds are not universal yet).
+
+If macOS still blocks a downloaded zip, clear the quarantine flag before opening:
+
+```bash
+xattr -cr "Local Resource Manager.app"
+```
 
 ## Run from source
 
@@ -166,7 +179,7 @@ Entry: `main.py` · UI: `app/ui/` · Core: `app/core/` · Build: [`build_exe.ps1
 
 ## Roadmap
 
-Windows installer · notarized macOS builds on Releases · improved release packaging · more UI layout options
+Windows installer · notarized / code-signed macOS builds · improved release packaging · more UI layout options
 
 ## Contact
 
