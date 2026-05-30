@@ -14,7 +14,25 @@ Built with Python and PySide6. Early public release; source builds are available
 
 ## Screenshots
 
-![Local Resource Manager screenshot](docs/screenshots/main-window.png)
+### Main window
+
+Multi-column folder navigation with bookmark tabs. Browse `demo_files` without exposing personal paths.
+
+![Main window — multi-column navigation and file list](docs/screenshots/main-window.png)
+
+### Search
+
+Search by name or extension (example: `md`). Folder match counts and query timing feedback.
+
+![Search — filter by extension with folder match counts](docs/screenshots/main-search.png)
+
+### Fast scan
+
+Index large libraries in seconds. Status bar shows file/folder counts and scan duration. Example local scan result; performance depends on hardware and folder structure.
+
+<p align="center">
+  <img src="docs/screenshots/main-scan-root.png" alt="Scan complete — 47,064 files indexed in 2.94s" width="900">
+</p>
 
 ## Core features
 
@@ -42,6 +60,8 @@ Cancellable scans · per-root databases · optional file watching and folder mat
 
 Everything runs locally. No files are uploaded to a server.
 
+Local indexes and config files are user data and should not be committed to Git.
+
 - **Windows `.exe`:** `%LOCALAPPDATA%\Local Resource Manager\` (`data\`, `config\`)
 - **Run from source:** `app/data/` and `app/config/` next to the project
 
@@ -53,7 +73,7 @@ Everything runs locally. No files are uploaded to a server.
 
 ## Windows (executable)
 
-Download **`Local Resource Manager.exe`** from [Releases](https://github.com/xintian-lab/local-resource-manager/releases) (or build locally — see below). Double-click to run. Settings and indexes are stored under `%LOCALAPPDATA%\Local Resource Manager\`.
+Windows `.exe` releases are planned for [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases). Until then, build locally on Windows (see below). Settings and indexes are stored under `%LOCALAPPDATA%\Local Resource Manager\`.
 
 Note: The Windows build may show a security warning because it is not code-signed yet.
 
@@ -94,6 +114,11 @@ Entry: `main.py` · UI: `app/ui/` · Core: `app/core/` · Build: [`build_exe.ps1
 ## Roadmap
 
 Windows installer · macOS `.app` · improved release packaging · more UI layout options
+
+## Contact
+
+- **Email:** [contact@xintianlab.com](mailto:contact@xintianlab.com)
+- **Bug reports & feature requests:** [GitHub Issues](https://github.com/xintian-lab/local-resource-manager/issues)
 
 ## License
 
