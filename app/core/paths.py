@@ -31,8 +31,16 @@ def user_data_dir() -> Path:
     if not getattr(sys, "frozen", False):
         return app_root_dir()
 
-    base_dir = os.environ.get("LOCALAPPDATA") or str(Path.home())
-    return Path(base_dir) / APP_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    if sys.platform == "win32":
+        base_dir = os.environ.get("LOCALAPPDATA") or str(Path.home())
+        return Path(base_dir) / APP_NAME
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home) / APP_NAME
+    return Path.home() / ".local" / "share" / APP_NAME
 
 
 def data_dir() -> Path:

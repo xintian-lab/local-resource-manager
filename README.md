@@ -2,7 +2,7 @@
 
 A desktop file explorer for **ultrafast** local search and multi-column folder navigation. Scan a folder, search by name or extension, and jump back to saved locations with bookmark tabs — all on your machine, no account required.
 
-Built with Python and PySide6. Early public release; Windows `.exe` and source builds are available on [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases/latest).
+Built with Python and PySide6. Early public release; Windows `.exe` on [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases/latest). macOS: build a local `.app` (see below) or run from source.
 
 ## Highlights
 
@@ -63,13 +63,14 @@ Everything runs locally. No files are uploaded to a server.
 Local indexes and config files are user data and should not be committed to Git.
 
 - **Windows `.exe`:** `%LOCALAPPDATA%\Local Resource Manager\` (`data\`, `config\`)
+- **macOS `.app`:** `~/Library/Application Support/Local Resource Manager/` (`data/`, `config/`)
 - **Run from source:** `app/data/` and `app/config/` next to the project
 
 ## Requirements
 
 - **Windows `.exe`:** Windows 10/11 (64-bit); no Python install required
-- **From source:** Python 3.10+
-- macOS / Linux: source only for now; packaged builds not finalized
+- **macOS `.app`:** macOS 12+ (Apple Silicon or Intel); build on a Mac (see below)
+- **From source:** Python 3.10+ on Windows, macOS, or Linux
 
 ## Windows (executable)
 
@@ -84,6 +85,40 @@ Note: The Windows build may show a security warning because it is not code-signe
 ```
 
 Output: `dist\Local Resource Manager.exe`
+
+## macOS (application)
+
+There is no pre-built macOS download on Releases yet. On a Mac, build a local `.app` with PyInstaller (one-time setup below), then run it or zip it for sharing.
+
+Settings and indexes are stored under `~/Library/Application Support/Local Resource Manager/`.
+
+Note: The app is not notarized yet; macOS may block it on first open. Use **Right-click → Open**, or allow it in **System Settings → Privacy & Security**.
+
+**Build locally (macOS):**
+
+Requires **Python 3.10+** (Homebrew: `brew install python@3.13`, or [python.org](https://www.python.org/downloads/)).
+
+```bash
+git clone https://github.com/xintian-lab/local-resource-manager.git
+cd local-resource-manager
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+chmod +x build_mac.sh
+./build_mac.sh
+open "dist/Local Resource Manager.app"
+```
+
+Output: `dist/Local Resource Manager.app`
+
+**Zip for GitHub Release (optional, run on the Mac that built the app):**
+
+```bash
+ditto -c -k --keepParent "dist/Local Resource Manager.app" "dist/Local-Resource-Manager-macOS.zip"
+```
+
+Upload the `.zip` to [GitHub Releases](https://github.com/xintian-lab/local-resource-manager/releases) alongside the Windows `.exe`. Build on the Mac you intend to support (Apple Silicon vs Intel builds are not universal yet).
 
 ## Run from source
 
@@ -103,21 +138,35 @@ python main.py
 
 If `py -3` fails, install Python 3.10+ from [python.org](https://www.python.org/downloads/) (check **Add python.exe to PATH**), or use an explicit version such as `py -3.13 -m venv .venv`.
 
-**macOS / Linux:** use `python3`, then `source .venv/bin/activate` instead of `.venv\Scripts\activate`.
+**macOS:**
+
+Requires **Python 3.10+**. Check with `python3 --version`. If needed: `brew install python@3.13`.
+
+```bash
+git clone https://github.com/xintian-lab/local-resource-manager.git
+cd local-resource-manager
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python main.py
+```
+
+**Linux:** same as macOS (`python3`, `source .venv/bin/activate`).
 
 ## Developer notes
 
-| Item | Source run | Windows `.exe` |
-| --- | --- | --- |
-| Settings | `app/config/settings.json` | `%LOCALAPPDATA%\Local Resource Manager\config\settings.json` |
-| Bookmark tabs | `app/config/bookmarks.json` | `%LOCALAPPDATA%\Local Resource Manager\config\bookmarks.json` |
-| Index database | `app/data/file_index*.db` | `%LOCALAPPDATA%\Local Resource Manager\data\file_index*.db` |
+| Item | Source run | Windows `.exe` | macOS `.app` |
+| --- | --- | --- | --- |
+| Settings | `app/config/settings.json` | `%LOCALAPPDATA%\Local Resource Manager\config\settings.json` | `~/Library/Application Support/Local Resource Manager/config/settings.json` |
+| Bookmark tabs | `app/config/bookmarks.json` | `%LOCALAPPDATA%\Local Resource Manager\config\bookmarks.json` | `~/Library/Application Support/Local Resource Manager/config/bookmarks.json` |
+| Index database | `app/data/file_index*.db` | `%LOCALAPPDATA%\Local Resource Manager\data\file_index*.db` | `~/Library/Application Support/Local Resource Manager/data/file_index*.db` |
 
-Entry: `main.py` · UI: `app/ui/` · Core: `app/core/` · Build: [`build_exe.ps1`](build_exe.ps1) · Dependencies: [`requirements.txt`](requirements.txt)
+Entry: `main.py` · UI: `app/ui/` · Core: `app/core/` · Build: [`build_exe.ps1`](build_exe.ps1) (Windows), [`build_mac.sh`](build_mac.sh) (macOS) · Dependencies: [`requirements.txt`](requirements.txt)
 
 ## Roadmap
 
-Windows installer · macOS `.app` · improved release packaging · more UI layout options
+Windows installer · notarized macOS builds on Releases · improved release packaging · more UI layout options
 
 ## Contact
 
