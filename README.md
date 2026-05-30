@@ -89,15 +89,19 @@ Output: `dist\Local Resource Manager.exe`
 
 **Windows:**
 
-```bash
+Requires **Python 3.10+**. On Windows, use the `py` launcher so `python` on your PATH (often an older install) is not picked by mistake. Check installed versions with `py -0p`.
+
+```powershell
 git clone https://github.com/xintian-lab/local-resource-manager.git
 cd local-resource-manager
-python -m venv .venv
+py -3 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 python main.py
 ```
+
+If `py -3` fails, install Python 3.10+ from [python.org](https://www.python.org/downloads/) (check **Add python.exe to PATH**), or use an explicit version such as `py -3.13 -m venv .venv`.
 
 **macOS / Linux:** use `python3`, then `source .venv/bin/activate` instead of `.venv\Scripts\activate`.
 
