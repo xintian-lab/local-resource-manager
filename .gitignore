@@ -17,6 +17,7 @@ app/config/settings.json
 app/config/bookmarks.json
 assets/icons/app_icon.png
 assets/icons/app_icon.ico
+assets/icons/app_icon.icns
 
 # Local screenshot demo tree (regenerate with create_demo_files.py)
 demo_files/

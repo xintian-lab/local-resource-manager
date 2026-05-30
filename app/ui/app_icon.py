@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import struct
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon, QImage, QPixmap
 from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 from app.core.paths import icons_dir
 
 ICON_BASENAMES = ("app_icon",)
-ICON_EXTENSIONS = (".ico", ".png", ".jpg", ".jpeg", ".webp")
+ICON_EXTENSIONS = (".ico", ".icns", ".png", ".jpg", ".jpeg", ".webp")
 
 
 def _icon_candidates() -> list[Path]:
@@ -83,6 +87,47 @@ def write_ico_from_png(png_path: Path, ico_path: Path) -> None:
     ico_path.write_bytes(icon_dir + icon_entry + png_data)
 
 
+_MAC_ICNS_SIZES: tuple[tuple[int, str], ...] = (
+    (16, "icon_16x16.png"),
+    (32, "icon_16x16@2x.png"),
+    (32, "icon_32x32.png"),
+    (64, "icon_32x32@2x.png"),
+    (128, "icon_128x128.png"),
+    (256, "icon_128x128@2x.png"),
+    (256, "icon_256x256.png"),
+    (512, "icon_256x256@2x.png"),
+    (512, "icon_512x512.png"),
+    (1024, "icon_512x512@2x.png"),
+)
+
+
+def write_icns_from_png(png_path: Path, icns_path: Path) -> bool:
+    if sys.platform != "darwin":
+        return False
+
+    image = QImage(str(png_path))
+    if image.isNull():
+        return False
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        iconset = Path(tmp_dir) / "AppIcon.iconset"
+        iconset.mkdir()
+        transform = Qt.TransformationMode.SmoothTransformation
+        aspect = Qt.AspectRatioMode.IgnoreAspectRatio
+        for size, filename in _MAC_ICNS_SIZES:
+            scaled = image.scaled(size, size, aspect, transform)
+            if scaled.isNull() or not scaled.save(str(iconset / filename), "PNG"):
+                return False
+
+        subprocess.run(
+            ["iconutil", "-c", "icns", str(iconset), "-o", str(icns_path)],
+            check=True,
+            capture_output=True,
+        )
+
+    return icns_path.is_file()
+
+
 def ensure_build_icons() -> Path | None:
     source = app_icon_path()
     if source is None:
@@ -103,5 +148,12 @@ def ensure_build_icons() -> Path | None:
 
     if not ico_path.exists() or ico_path.stat().st_mtime < png_path.stat().st_mtime:
         write_ico_from_png(png_path, ico_path)
+
+    if sys.platform == "darwin":
+        icns_path = icons / "app_icon.icns"
+        if not icns_path.exists() or icns_path.stat().st_mtime < png_path.stat().st_mtime:
+            if not write_icns_from_png(png_path, icns_path):
+                return None
+        return icns_path if icns_path.is_file() else None
 
     return ico_path if ico_path.is_file() else None

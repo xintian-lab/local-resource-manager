@@ -23,7 +23,16 @@ rm -rf "$PROJECT_ROOT/build"
 rm -f "$PROJECT_ROOT/${APP_NAME}.spec"
 
 ICONS_DIR="$PROJECT_ROOT/assets/icons"
-"$PYTHON" -c "from app.ui.app_icon import ensure_build_icons; ensure_build_icons()"
+ICON_FILE="$("$PYTHON" -c "from app.ui.app_icon import ensure_build_icons; p = ensure_build_icons(); print(p or '')")"
+if [[ -z "$ICON_FILE" || ! -f "$ICON_FILE" ]]; then
+    echo "Failed to generate app_icon.icns (macOS requires .icns for PyInstaller)." >&2
+    exit 1
+fi
+if [[ "$ICON_FILE" != *.icns ]]; then
+    echo "Expected .icns icon for macOS build, got: $ICON_FILE" >&2
+    exit 1
+fi
+
 ADD_DATA="$PROJECT_ROOT/assets/icons:assets/icons"
 
 PYINSTALLER_ARGS=(
@@ -32,15 +41,8 @@ PYINSTALLER_ARGS=(
     --windowed
     --name "$APP_NAME"
     --add-data "$ADD_DATA"
+    --icon "$ICON_FILE"
 )
-
-ICON_ICNS="$ICONS_DIR/app_icon.icns"
-ICON_PNG="$ICONS_DIR/app_icon.png"
-if [[ -f "$ICON_ICNS" ]]; then
-    PYINSTALLER_ARGS+=(--icon "$ICON_ICNS")
-elif [[ -f "$ICON_PNG" ]]; then
-    PYINSTALLER_ARGS+=(--icon "$ICON_PNG")
-fi
 
 "$PYTHON" -m PyInstaller "${PYINSTALLER_ARGS[@]}" "$PROJECT_ROOT/main.py"
 
